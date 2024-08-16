@@ -170,6 +170,7 @@ def minimax(
         # Use the environment's observation and eval_func for terminal state evaluation
         observation = env.observation()  # Get the observation from the environment
         _, value = eval_func(observation)
+        #print(f'value: {value}')
 
         return value
 
@@ -642,7 +643,6 @@ def parallel_uct_search(
         root_node = Node(to_play=env.to_play, num_actions=env.action_dim, parent=DummyNode())
         expand(root_node, prior_prob)
         backup(root_node, value)
-        print(f'value: {value}')
 
     assert root_node.to_play == env.to_play
 
@@ -712,6 +712,7 @@ def parallel_uct_search(
 
                 expand(leaf, prior_prob)
                 backup(leaf, value)
+                print(f'value: {value}')
 
     # Play - generate search policy action probability from the root node's child visit number.
     search_pi = generate_search_policy(root_node.child_N, 1.0 if warm_up else 0.1, root_legal_actions)

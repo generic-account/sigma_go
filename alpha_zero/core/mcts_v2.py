@@ -170,7 +170,7 @@ def minimax(
         # Use the environment's observation and eval_func for terminal state evaluation
         observation = env.observation()  # Get the observation from the environment
         _, value = eval_func(observation)
-        #print(f'value: {value}')
+        print(f'value: {value}')
 
         return value
 

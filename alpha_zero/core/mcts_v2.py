@@ -47,6 +47,7 @@ In this case, a max(-0.8, -0.3) will give us the correct results for black playe
 import copy
 import collections
 import math
+import time
 from typing import Callable, Tuple, Mapping, Iterable, Any
 import numpy as np
 
@@ -66,11 +67,11 @@ class Node:
     """Node in the MCTS search tree."""
 
     def __init__(
-        self,
-        to_play: int,
-        num_actions: np.ndarray,
-        move: int = None,
-        parent: Any = None,
+            self,
+            to_play: int,
+            num_actions: np.ndarray,
+            move: int = None,
+            parent: Any = None,
     ) -> None:
         """
         Args:
@@ -139,12 +140,74 @@ class Node:
         return isinstance(self.parent, Node)
 
 
+def minimax(
+        env,
+        node: Node,
+        depth: int,
+        alpha: float,
+        beta: float,
+        maximizing_player: bool,
+        eval_func: Callable[[np.ndarray], Tuple[Iterable[np.ndarray], float]]
+) -> float:
+    """
+    Minimax algorithm with alpha-beta pruning to evaluate the best move for the current player.
+
+    Args:
+        env: The current game environment (used only for observation in terminal nodes).
+        node: The current node in the search tree.
+        depth: The maximum depth to search.
+        alpha: The alpha value for alpha-beta pruning.
+        beta: The beta value for alpha-beta pruning.
+        maximizing_player: True if it's the maximizing player's turn, False if it's the minimizing player's turn.
+        eval_func: A function that evaluates the game state and returns the value from the current player's perspective.
+
+    Returns:
+        The evaluation score of the node.
+    """
+
+    # Base case: if we reach the maximum depth or the node is terminal (not expanded)
+    if depth == 0 or not node.is_expanded:
+        # Use the environment's observation and eval_func for terminal state evaluation
+        observation = env.observation()  # Get the observation from the environment
+        _, value = eval_func(observation)
+
+        return value
+
+    # Get the legal moves (i.e., child nodes that are expanded)
+    legal_moves = np.where(node.child_N > 0)[0]
+
+    if maximizing_player:
+        max_eval = float('-inf')
+        for move in legal_moves:
+            child_node = node.children[move]
+            eval = minimax(env, child_node, depth - 1, alpha, beta, False, eval_func)
+            max_eval = max(max_eval, eval)
+            alpha = max(alpha, eval)
+            if beta <= alpha:
+                break  # Beta cut-off
+        return max_eval
+    else:
+        min_eval = float('inf')
+        for move in legal_moves:
+            child_node = node.children[move]
+            eval = minimax(env, child_node, depth - 1, alpha, beta, True, eval_func)
+            min_eval = min(min_eval, eval)
+            beta = min(beta, eval)
+            if beta <= alpha:
+                break  # Alpha cut-off
+        return min_eval
+
+
 def best_child(
-    node: Node,
-    legal_actions: np.ndarray,
-    c_puct_base: float,
-    c_puct_init: float,
-    child_to_play: int,
+        env,
+        node: Node,
+        legal_actions: np.ndarray,
+        c_puct_base: float,
+        c_puct_init: float,
+        child_to_play: int,
+        eval_func: Callable[[np.ndarray], Tuple[Iterable[np.ndarray], Iterable[float]]],
+        alpha: float = 0.5,
+        minimax_depth: int = 2,
 ) -> Node:
     """Returns best child node with maximum action value Q plus an upper confidence bound U.
     And creates the selected best child node if not already exists.
@@ -156,6 +219,9 @@ def best_child(
         c_puct_base: a float constant determining the level of exploration.
         c_puct_init: a float constant determining the level of exploration.
         child_to_play: the player id for children nodes.
+        eval_func: an evaluation function when called returns the action probabilities and predicted value from current player's perspective.
+        alpha: a float constant to balance the UCB scores and Minimax values.
+        minimax_depth: the maximum depth to search for Minimax algorithm.
 
     Returns:
         The best child node corresponding to the UCT score.
@@ -172,10 +238,27 @@ def best_child(
     # so we always switch the sign for node.child_Q values, this is required since we're talking about two-player, zero-sum games.
     ucb_scores = -node.child_Q() + node.child_U(c_puct_base, c_puct_init)
 
-    # Exclude illegal actions, note in some cases, the max ucb_scores may be zero.
-    ucb_scores = np.where(legal_actions == 1, ucb_scores, -9999)
+    # Initialize the minimax scores for legal actions
+    minimax_values = np.full_like(ucb_scores, fill_value=-9999.0, dtype=np.float32)
 
-    move = np.argmax(ucb_scores)
+    # Apply minimax to the legal actions only
+    for move in range(len(legal_actions)):
+        if legal_actions[move] == 1:
+            if move in node.children:
+                minimax_values[move] = minimax(env, node.children[move], minimax_depth, float('-inf'), float('inf'),
+                                               node.to_play == 1, eval_func)
+            else:
+                # If the child node does not exist, treat it as a leaf with no Minimax value
+                minimax_values[move] = 0
+
+    # Combine the UCB scores and Minimax values with a weighted sum
+    combined_scores = (1 - alpha) * ucb_scores + alpha * minimax_values
+
+    # Exclude illegal actions by setting the combined scores to -9999
+    combined_scores = np.where(legal_actions == 1, combined_scores, -9999)
+
+    # Select the move with the highest combined score
+    move = np.argmax(combined_scores)
 
     assert legal_actions[move] == 1
 
@@ -200,9 +283,9 @@ def expand(node: Node, prior_prob: np.ndarray) -> None:
     if node.is_expanded:
         raise RuntimeError('Node already expanded.')
     if (
-        not isinstance(prior_prob, np.ndarray)
-        or len(prior_prob.shape) != 1
-        or prior_prob.dtype not in (np.float32, np.float64)
+            not isinstance(prior_prob, np.ndarray)
+            or len(prior_prob.shape) != 1
+            or prior_prob.dtype not in (np.float32, np.float64)
     ):
         raise ValueError(f'Expect `prior_prob` to be a 1D float numpy.array, got {prior_prob}')
 
@@ -299,15 +382,15 @@ def generate_search_policy(child_N: np.ndarray, temperature: float, legal_action
 
 
 def uct_search(
-    env: BoardGameEnv,
-    eval_func: Callable[[np.ndarray, bool], Tuple[Iterable[np.ndarray], Iterable[float]]],
-    root_node: Node,
-    c_puct_base: float,
-    c_puct_init: float,
-    num_simulations: int = 800,
-    root_noise: bool = False,
-    warm_up: bool = False,
-    deterministic: bool = False,
+        env: BoardGameEnv,
+        eval_func: Callable[[np.ndarray, bool], Tuple[Iterable[np.ndarray], Iterable[float]]],
+        root_node: Node,
+        c_puct_base: float,
+        c_puct_init: float,
+        num_simulations: int = 800,
+        root_noise: bool = False,
+        warm_up: bool = False,
+        deterministic: bool = False,
 ) -> Tuple[int, np.ndarray, float, float, Node]:
     """Single-threaded Upper Confidence Bound (UCB) for Trees (UCT) search without any rollout.
 
@@ -390,11 +473,13 @@ def uct_search(
         while node.is_expanded:
             # Select the best move and create the child node on demand
             node = best_child(
+                env,
                 node,
                 sim_env.legal_actions,
                 c_puct_base,
                 c_puct_init,
                 sim_env.opponent_player,
+                eval_func,
             )
             # Make move on the simulation environment.
             obs, reward, done, _ = sim_env.step(node.move)
@@ -430,7 +515,8 @@ def uct_search(
     else:
         # Sample an action
         # Prevent the agent to select pass move during opening moves
-        while move is None or (warm_up and env.has_pass_move and move == env.pass_move) or root_legal_actions[move] != 1:
+        while move is None or (warm_up and env.has_pass_move and move == env.pass_move) or root_legal_actions[
+            move] != 1:
             move = np.random.choice(np.arange(search_pi.shape[0]), p=search_pi)
 
     if move in root_node.children:
@@ -483,16 +569,16 @@ def revert_virtual_loss(node: Node) -> None:
 
 
 def parallel_uct_search(
-    env: BoardGameEnv,
-    eval_func: Callable[[np.ndarray], Tuple[Iterable[np.ndarray], Iterable[float]]],
-    root_node: Node,
-    c_puct_base: float,
-    c_puct_init: float,
-    num_simulations: int,
-    num_parallel: int,
-    root_noise: bool = False,
-    warm_up: bool = False,
-    deterministic: bool = False,
+        env: BoardGameEnv,
+        eval_func: Callable[[np.ndarray], Tuple[Iterable[np.ndarray], Iterable[float]]],
+        root_node: Node,
+        c_puct_base: float,
+        c_puct_init: float,
+        num_simulations: int,
+        num_parallel: int,
+        root_noise: bool = False,
+        warm_up: bool = False,
+        deterministic: bool = False,
 ) -> Tuple[int, np.ndarray, float, float, Node]:
     """Single-threaded Upper Confidence Bound (UCB) for Trees (UCT) search without any rollout.
 
@@ -556,6 +642,7 @@ def parallel_uct_search(
         root_node = Node(to_play=env.to_play, num_actions=env.action_dim, parent=DummyNode())
         expand(root_node, prior_prob)
         backup(root_node, value)
+        print(f'value: {value}')
 
     assert root_node.to_play == env.to_play
 
@@ -587,11 +674,13 @@ def parallel_uct_search(
             while node.is_expanded:
                 # Select the best move and create the child node on demand
                 node = best_child(
+                    env,
                     node,
                     sim_env.legal_actions,
                     c_puct_base,
                     c_puct_init,
                     sim_env.opponent_player,
+                    eval_func,
                 )
                 # Make move on the simulation environment.
                 obs, reward, done, _ = sim_env.step(node.move)
@@ -637,7 +726,8 @@ def parallel_uct_search(
     else:
         # Sample an action
         # Prevent the agent to select pass move during opening moves
-        while move is None or (warm_up and env.has_pass_move and move == env.pass_move) or root_legal_actions[move] != 1:
+        while move is None or (warm_up and env.has_pass_move and move == env.pass_move) or root_legal_actions[
+            move] != 1:
             move = np.random.choice(np.arange(search_pi.shape[0]), p=search_pi)
 
     if move in root_node.children:

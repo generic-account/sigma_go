@@ -13,5 +13,3 @@ nohup.out
 # Jupyter Notebook
 .ipynb_checkpoints
 
-# venv
-.venv

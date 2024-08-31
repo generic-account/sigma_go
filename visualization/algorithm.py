@@ -1,6 +1,6 @@
 import sente
 import random
-from katago import KataGo
+from visualization.katago import KataGo
 
 import os
 os.environ['BOARD_SIZE'] = '9'

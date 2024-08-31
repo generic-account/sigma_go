@@ -4,8 +4,8 @@ import random
 from PyQt6.QtWidgets import *
 from PyQt6.QtGui import *
 from PyQt6.QtCore import *
-from algorithm import Info, sgEvaluate, adversaryEvaluate
-from tromptaylor import convertBoard, tromptaylor
+from visualization.algorithm import Info, sgEvaluate, adversaryEvaluate
+from visualization.tromptaylor import convertBoard, tromptaylor
 
 class Node:
     def __init__(self, move: (int, int) = None, parent = None):

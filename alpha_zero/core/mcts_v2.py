@@ -164,14 +164,15 @@ def minimax(
     Returns:
         The evaluation score of the node.
     """
+    # Add depth tracking
+    initial_depth = depth
 
     # Base case: if we reach the maximum depth or the node is terminal (not expanded)
     if depth == 0 or not node.is_expanded:
-        # Use the environment's observation and eval_func for terminal state evaluation
-        observation = env.observation()  # Get the observation from the environment
+        # Use the sim_env's observation for terminal state evaluation
+        observation = env.observation()  # Get the observation from the simulated environment
         _, value = eval_func(observation)
-        print(f'value: {value}')
-
+        print(f'Minimax leaf value: {value} at depth {initial_depth - depth}')
         return value
 
     # Get the legal moves (i.e., child nodes that are expanded)
@@ -180,8 +181,15 @@ def minimax(
     if maximizing_player:
         max_eval = float('-inf')
         for move in legal_moves:
+            # Create a copy of the environment for simulation
+            sim_env = copy.deepcopy(env)
+            
+            # Apply the move to the simulated environment
+            _, _, done, _ = sim_env.step(move)
+            
             child_node = node.children[move]
-            eval = minimax(env, child_node, depth - 1, alpha, beta, False, eval_func)
+            eval = minimax(sim_env, child_node, depth - 1, alpha, beta, False, eval_func)
+            print(f'Minimax value: {eval} at depth {initial_depth - depth}')
             max_eval = max(max_eval, eval)
             alpha = max(alpha, eval)
             if beta <= alpha:
@@ -190,8 +198,15 @@ def minimax(
     else:
         min_eval = float('inf')
         for move in legal_moves:
+            # Create a copy of the environment for simulation
+            sim_env = copy.deepcopy(env)
+            
+            # Apply the move to the simulated environment
+            _, _, done, _ = sim_env.step(move)
+            
             child_node = node.children[move]
-            eval = minimax(env, child_node, depth - 1, alpha, beta, True, eval_func)
+            eval = minimax(sim_env, child_node, depth - 1, alpha, beta, True, eval_func)
+            print(f'Minimax value: {eval} at depth {initial_depth - depth}')
             min_eval = min(min_eval, eval)
             beta = min(beta, eval)
             if beta <= alpha:
@@ -208,7 +223,7 @@ def best_child(
         child_to_play: int,
         eval_func: Callable[[np.ndarray], Tuple[Iterable[np.ndarray], Iterable[float]]],
         alpha: float = 0.5,
-        minimax_depth: int = 2,
+        minimax_depth: int = 3,
 ) -> Node:
     """Returns best child node with maximum action value Q plus an upper confidence bound U.
     And creates the selected best child node if not already exists.
@@ -238,6 +253,7 @@ def best_child(
     # when we select the best child for node, we want to do so from node.to_play's perspective,
     # so we always switch the sign for node.child_Q values, this is required since we're talking about two-player, zero-sum games.
     ucb_scores = -node.child_Q() + node.child_U(c_puct_base, c_puct_init)
+    print(f"UCB scores: {ucb_scores}")
 
     # Initialize the minimax scores for legal actions
     minimax_values = np.full_like(ucb_scores, fill_value=-9999.0, dtype=np.float32)
@@ -252,14 +268,18 @@ def best_child(
                 # If the child node does not exist, treat it as a leaf with no Minimax value
                 minimax_values[move] = 0
 
+    print(f"Minimax values: {minimax_values}")
+
     # Combine the UCB scores and Minimax values with a weighted sum
     combined_scores = (1 - alpha) * ucb_scores + alpha * minimax_values
 
     # Exclude illegal actions by setting the combined scores to -9999
     combined_scores = np.where(legal_actions == 1, combined_scores, -9999)
+    print(f"Combined scores: {combined_scores}")
 
     # Select the move with the highest combined score
     move = np.argmax(combined_scores)
+    print(f"Selected move: {move}")
 
     assert legal_actions[move] == 1
 
@@ -712,7 +732,7 @@ def parallel_uct_search(
 
                 expand(leaf, prior_prob)
                 backup(leaf, value)
-                print(f'value: {value}')
+                #print(f'value: {value}')
 
     # Play - generate search policy action probability from the root node's child visit number.
     search_pi = generate_search_policy(root_node.child_N, 1.0 if warm_up else 0.1, root_legal_actions)

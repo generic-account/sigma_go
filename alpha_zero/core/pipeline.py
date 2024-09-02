@@ -44,39 +44,47 @@ from alpha_zero.utils.util import Timer, create_logger, get_time_stamp
 
 
 def disable_auto_grad(network: torch.nn.Module) -> None:
+    """Disables automatic gradient computation for all parameters in the network."""
     for p in network.parameters():
         p.requires_grad = False
 
 
 def set_seed(seed) -> None:
+    """Sets random seeds for reproducibility."""
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
 
 
 def maybe_create_dir(dir) -> None:
+    """Creates a directory if it doesn't exist."""
     if dir is not None and dir != '' and not os.path.exists(dir):
         p = Path(dir)
         p.mkdir(parents=True, exist_ok=False)
 
 
 def save_to_file(obj: Any, file_name: str) -> None:
+    """Saves an object to a file using pickle."""
     pickle.dump(obj, open(file_name, 'wb'))
 
 
 def load_from_file(file_name: str) -> Any:
+    """Loads an object from a file using pickle."""
     return pickle.load(open(file_name, 'rb'))
 
 
 def round_it(v, places=4) -> float:
+    """Rounds a value to a specified number of decimal places."""
     return round(v, places)
 
 
 def _encode_bytes(in_str) -> Any:
+    """Encodes a string to bytes."""
     return str(in_str).encode('utf-8')
 
 
 def _decode_bytes(b) -> str:
+    """Decodes bytes to a string."""
     return b.decode('utf-8')
 
 
@@ -88,13 +96,36 @@ def create_mcts_player(
     root_noise: bool = False,
     deterministic: bool = False,
 ) -> Callable[[BoardGameEnv, Node, float, float, bool], Tuple[int, np.ndarray, float, float, Node]]:
+    """
+    Creates an MCTS player function that uses the provided neural network for position evaluation.
+
+    Args:
+        network: The neural network used for position evaluation.
+        device: The device (CPU/GPU) to run the network on.
+        num_simulations: The number of simulations to run for each move.
+        num_parallel: The number of parallel threads to use for MCTS.
+        root_noise: Whether to add noise to the root node.
+        deterministic: Whether to choose moves deterministically or not.
+
+    Returns:
+        A function that can be used as an MCTS player.
+    """
+
     @torch.no_grad()
     def eval_position(
         state: np.ndarray,
         batched: bool = False,
     ) -> Tuple[Iterable[np.ndarray], Iterable[float]]:
-        """Give a game state tensor, returns the action probabilities
-        and estimated state value from current player's perspective."""
+        """
+        Evaluates a game state using the neural network.
+
+        Args:
+            state: The game state to evaluate.
+            batched: Whether the input is batched or not.
+
+        Returns:
+            A tuple containing the action probabilities and estimated state value.
+        """
 
         if not batched:
             state = state[None, ...]
@@ -129,6 +160,20 @@ def create_mcts_player(
         c_puct_init: float,
         warm_up: bool = False,
     ) -> Tuple[int, np.ndarray, float, float, Node]:
+        """
+        Performs MCTS and returns the chosen action and related information.
+
+        Args:
+            env: The game environment.
+            root_node: The root node for MCTS.
+            c_puct_base: The base constant for the PUCT formula.
+            c_puct_init: The initial constant for the PUCT formula.
+            warm_up: Whether this is a warm-up phase or not.
+
+        Returns:
+            A tuple containing the chosen action, search probabilities, Q-value of the root,
+            Q-value of the best child, and the new root node.
+        """
         if num_parallel > 1:
             return parallel_uct_search(
                 env=env,
@@ -187,7 +232,35 @@ def run_selfplay_actor_loop(
     ckpt_event: mp.Event,
     stop_event: mp.Event,
 ) -> None:
-    """Use the latest neural network to play against itself, and record the transitions for training."""
+    """
+    Runs the self-play loop for an actor.
+
+    This function uses the latest neural network to play against itself and record the transitions for training.
+
+    Args:
+        seed: Random seed for reproducibility.
+        rank: Rank of the actor process.
+        network: The neural network model.
+        device: The device (CPU/GPU) to run the network on.
+        data_queue: Queue to put the generated game data.
+        env: The game environment.
+        num_simulations: Number of MCTS simulations per move.
+        num_parallel: Number of parallel threads for MCTS.
+        c_puct_base: Base constant for the PUCT formula.
+        c_puct_init: Initial constant for the PUCT formula.
+        warm_up_steps: Number of initial steps to consider as warm-up.
+        check_resign_after_steps: Number of steps after which to check for resignation.
+        disable_resign_ratio: Ratio of games where resignation is disabled.
+        save_sgf_dir: Directory to save SGF files.
+        save_sgf_interval: Interval of games after which to save an SGF file.
+        logs_dir: Directory to save log files.
+        load_ckpt: Path to load a checkpoint from.
+        log_level: Logging level.
+        var_ckpt: Shared variable for the latest checkpoint.
+        var_resign_threshold: Shared variable for the resignation threshold.
+        ckpt_event: Event to signal when a new checkpoint is available.
+        stop_event: Event to signal when to stop the actor loop.
+    """
     assert num_simulations > 1
 
     set_seed(int(seed + rank))
@@ -297,6 +370,23 @@ def play_and_record_one_game(
     resign_threshold: float,
     logger: Any,
 ) -> Tuple[Iterable[Transition], Mapping[Text, Any]]:
+    """
+    Plays and records one game using the MCTS player.
+
+    Args:
+        env: The game environment.
+        mcts_player: The MCTS player function.
+        resign_disabled: Whether resignation is disabled for this game.
+        c_puct_base: Base constant for the PUCT formula.
+        c_puct_init: Initial constant for the PUCT formula.
+        warm_up_steps: Number of initial steps to consider as warm-up.
+        check_resign_after_steps: Number of steps after which to check for resignation.
+        resign_threshold: Threshold for resignation.
+        logger: Logger object for debugging.
+
+    Returns:
+        A tuple containing the game sequence (list of Transitions) and game statistics.
+    """
     obs = env.reset()
     done = False
 

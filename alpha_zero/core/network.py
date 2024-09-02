@@ -13,12 +13,24 @@ import torch.nn.functional as F
 
 
 class NetworkOutputs(NamedTuple):
+    """Named tuple for network outputs."""
     pi_prob: torch.Tensor
     value: torch.Tensor
 
 
-def calc_conv2d_output(h_w, kernel_size=1, stride=1, pad=0, dilation=1):
-    """takes a tuple of (h,w) and returns a tuple of (h,w)"""
+def calc_conv2d_output(h_w: Tuple[int, int], kernel_size=1, stride=1, pad=0, dilation=1) -> Tuple[int, int]:
+    """Calculate the output size of a 2D convolution layer.
+
+    Args:
+        h_w: A tuple of (height, width) of the input.
+        kernel_size: The size of the kernel.
+        stride: The stride of the convolution.
+        pad: The padding of the convolution.
+        dilation: The dilation of the convolution.
+
+    Returns:
+        A tuple of (height, width) of the output.
+    """
 
     if not isinstance(kernel_size, tuple):
         kernel_size = (kernel_size, kernel_size)
@@ -28,7 +40,11 @@ def calc_conv2d_output(h_w, kernel_size=1, stride=1, pad=0, dilation=1):
 
 
 def initialize_weights(net: nn.Module) -> None:
-    """Initialize weights for Conv2d and Linear layers using kaming initializer."""
+    """Initialize weights for Conv2d and Linear layers using Kaiming initializer.
+
+    Args:
+        net: The neural network to initialize.
+    """
     assert isinstance(net, nn.Module)
 
     for module in net.modules():
@@ -40,7 +56,7 @@ def initialize_weights(net: nn.Module) -> None:
 
 
 class ResNetBlock(nn.Module):
-    """Basic redisual block."""
+    """Basic residual block."""
 
     def __init__(
         self,
@@ -74,6 +90,14 @@ class ResNetBlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass of the residual block.
+
+        Args:
+            x: The input tensor.
+
+        Returns:
+            The output tensor.
+        """
         residual = x
         out = self.conv_block1(x)
         out = self.conv_block2(out)
@@ -159,7 +183,14 @@ class AlphaZeroNet(nn.Module):
 
     def forward(self, x: torch.Tensor) -> NetworkOutputs:
         """Given raw state x, predict the raw logits probability distribution for all actions,
-        and the evaluated value, all from current player's perspective."""
+        and the evaluated value, all from current player's perspective.
+
+        Args:
+            x: The input tensor.
+
+        Returns:
+            A tuple of (pi_logits, value).
+        """
 
         conv_block_out = self.conv_block(x)
         features = self.res_blocks(conv_block_out)

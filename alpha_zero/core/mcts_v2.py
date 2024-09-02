@@ -52,6 +52,7 @@ from typing import Callable, Tuple, Mapping, Iterable, Any
 import numpy as np
 
 from alpha_zero.envs.base import BoardGameEnv
+from alpha_zero.envs.go import GoEnv  
 
 
 class DummyNode(object):
@@ -61,7 +62,6 @@ class DummyNode(object):
         self.parent = None
         self.child_W = collections.defaultdict(float)
         self.child_N = collections.defaultdict(float)
-
 
 class Node:
     """Node in the MCTS search tree."""
@@ -77,7 +77,6 @@ class Node:
         Args:
             to_play: the id of the current player.
             num_actions: number of total actions, including illegal move.
-            prior: a prior probability of the node for a specific action, could be empty in case of root node.
             move: the action associated with the prior probability.
             parent: the parent node, could be a `DummyNode` if this is the root node.
         """
@@ -141,38 +140,45 @@ class Node:
 
 
 def minimax(
-        env,
-        node: Node,
-        depth: int,
-        alpha: float,
-        beta: float,
-        maximizing_player: bool,
-        eval_func: Callable[[np.ndarray], Tuple[Iterable[np.ndarray], float]]
+    env: BoardGameEnv,
+    node: Node,
+    max_depth: int,
+    alpha: float,
+    beta: float,
+    maximizing_player: bool,
+    eval_func: Callable[[np.ndarray], Tuple[Iterable[np.ndarray], float]],
+    transposition_table: dict
 ) -> float:
     """
-    Minimax algorithm with alpha-beta pruning to evaluate the best move for the current player.
+    Minimax algorithm with alpha-beta pruning and dynamic depth based on tactical complexity.
 
     Args:
-        env: The current game environment (used only for observation in terminal nodes).
+        env: The current game environment.
         node: The current node in the search tree.
-        depth: The maximum depth to search.
+        max_depth: The maximum depth to search.
         alpha: The alpha value for alpha-beta pruning.
         beta: The beta value for alpha-beta pruning.
         maximizing_player: True if it's the maximizing player's turn, False if it's the minimizing player's turn.
         eval_func: A function that evaluates the game state and returns the value from the current player's perspective.
+        transposition_table: A dictionary to store and retrieve previously computed positions.
 
     Returns:
         The evaluation score of the node.
     """
-    # Add depth tracking
-    initial_depth = depth
+    # Check if the position has been seen before
+    state_hash = hash(str(env.observation()))
+    if state_hash in transposition_table:
+        return transposition_table[state_hash]
 
-    # Base case: if we reach the maximum depth or the node is terminal (not expanded)
-    if depth == 0 or not node.is_expanded:
-        # Use the sim_env's observation for terminal state evaluation
-        observation = env.observation()  # Get the observation from the simulated environment
+    # Remove the complexity assessment from here
+    adjusted_depth = max_depth
+
+    # Base case: if we reach the adjusted depth or the node is terminal
+    if adjusted_depth == 0 or not node.is_expanded or env.is_game_over():
+        # Use the neural network for evaluation
+        observation = env.observation()
         _, value = eval_func(observation)
-        print(f'Minimax leaf value: {value} at depth {initial_depth - depth}')
+        transposition_table[state_hash] = value
         return value
 
     # Get the legal moves (i.e., child nodes that are expanded)
@@ -181,108 +187,106 @@ def minimax(
     if maximizing_player:
         max_eval = float('-inf')
         for move in legal_moves:
-            # Create a copy of the environment for simulation
             sim_env = copy.deepcopy(env)
-            
-            # Apply the move to the simulated environment
             _, _, done, _ = sim_env.step(move)
             
-            child_node = node.children[move]
-            eval = minimax(sim_env, child_node, depth - 1, alpha, beta, False, eval_func)
-            print(f'Minimax value: {eval} at depth {initial_depth - depth}')
+            child_node = node.children.get(move)
+            if child_node is None:
+                child_node = Node(to_play=sim_env.to_play, num_actions=node.num_actions, move=move, parent=node)
+                node.children[move] = child_node
+
+            eval = minimax(sim_env, child_node, adjusted_depth - 1, alpha, beta, False, eval_func, transposition_table)
             max_eval = max(max_eval, eval)
             alpha = max(alpha, eval)
             if beta <= alpha:
                 break  # Beta cut-off
+        transposition_table[state_hash] = max_eval
         return max_eval
     else:
         min_eval = float('inf')
         for move in legal_moves:
-            # Create a copy of the environment for simulation
             sim_env = copy.deepcopy(env)
-            
-            # Apply the move to the simulated environment
             _, _, done, _ = sim_env.step(move)
             
-            child_node = node.children[move]
-            eval = minimax(sim_env, child_node, depth - 1, alpha, beta, True, eval_func)
-            print(f'Minimax value: {eval} at depth {initial_depth - depth}')
+            child_node = node.children.get(move)
+            if child_node is None:
+                child_node = Node(to_play=sim_env.to_play, num_actions=node.num_actions, move=move, parent=node)
+                node.children[move] = child_node
+
+            eval = minimax(sim_env, child_node, adjusted_depth - 1, alpha, beta, True, eval_func, transposition_table)
             min_eval = min(min_eval, eval)
             beta = min(beta, eval)
             if beta <= alpha:
                 break  # Alpha cut-off
+        transposition_table[state_hash] = min_eval
         return min_eval
 
 
 def best_child(
-        env,
-        node: Node,
-        legal_actions: np.ndarray,
-        c_puct_base: float,
-        c_puct_init: float,
-        child_to_play: int,
-        eval_func: Callable[[np.ndarray], Tuple[Iterable[np.ndarray], Iterable[float]]],
-        alpha: float = 0.5,
-        minimax_depth: int = 3,
+    env,
+    node: Node,
+    legal_actions: np.ndarray,
+    c_puct_base: float,
+    c_puct_init: float,
+    child_to_play: int,
+    eval_func: Callable[[np.ndarray], Tuple[Iterable[np.ndarray], Iterable[float]]],
+    alpha: float = 0.5,
+    minimax_depth: int = 5,
 ) -> Node:
-    """Returns best child node with maximum action value Q plus an upper confidence bound U.
-    And creates the selected best child node if not already exists.
-
-    Args:
-        node: the current node in the search tree.
-        legal_actions: a 1D bool numpy.array mask for all actions,
-                where `1` represents legal move and `0` represents illegal move.
-        c_puct_base: a float constant determining the level of exploration.
-        c_puct_init: a float constant determining the level of exploration.
-        child_to_play: the player id for children nodes.
-        eval_func: an evaluation function when called returns the action probabilities and predicted value from current player's perspective.
-        alpha: a float constant to balance the UCB scores and Minimax values.
-        minimax_depth: the maximum depth to search for Minimax algorithm.
-
-    Returns:
-        The best child node corresponding to the UCT score.
-
-    Raises:
-        ValueError:
-            if the node instance itself is a leaf node.
-    """
     if not node.is_expanded:
         raise ValueError('Expand leaf node first.')
 
-    # The child Q value is evaluated from the opponent perspective.
-    # when we select the best child for node, we want to do so from node.to_play's perspective,
-    # so we always switch the sign for node.child_Q values, this is required since we're talking about two-player, zero-sum games.
     ucb_scores = -node.child_Q() + node.child_U(c_puct_base, c_puct_init)
-    print(f"UCB scores: {ucb_scores}")
+    print(f"Best Child: UCB scores: {ucb_scores}")
 
-    # Initialize the minimax scores for legal actions
+    # Only perform minimax on the top N moves according to UCB scores
+    top_n = 5  # You can adjust this value
+    top_moves = np.argsort(ucb_scores)[-top_n:]
+    
     minimax_values = np.full_like(ucb_scores, fill_value=-9999.0, dtype=np.float32)
+    transposition_table = {}
 
-    # Apply minimax to the legal actions only
-    for move in range(len(legal_actions)):
+    # Perform one tactical complexity assessment for the current board state
+    if isinstance(env, GoEnv):
+        complexity = env.assess_tactical_complexity()
+        adjusted_depth = min(minimax_depth, max(1, int(minimax_depth * (1 + complexity / 100))))
+        print(f"Tactical complexity: {complexity}, Adjusted depth: {adjusted_depth}")
+    else:
+        adjusted_depth = minimax_depth
+
+    for move in top_moves:
         if legal_actions[move] == 1:
-            if move in node.children:
-                minimax_values[move] = minimax(env, node.children[move], minimax_depth, float('-inf'), float('inf'),
-                                               node.to_play == 1, eval_func)
-            else:
-                # If the child node does not exist, treat it as a leaf with no Minimax value
-                minimax_values[move] = 0
+            sim_env = copy.deepcopy(env)
+            sim_env.step(move)
+            
+            child_node = node.children.get(move)
+            if child_node is None:
+                child_node = Node(to_play=child_to_play, num_actions=node.num_actions, move=move, parent=node)
+                node.children[move] = child_node
 
-    print(f"Minimax values: {minimax_values}")
+            minimax_values[move] = minimax(
+                sim_env, 
+                child_node, 
+                adjusted_depth, 
+                float('-inf'), 
+                float('inf'),
+                node.to_play == 1, 
+                eval_func, 
+                transposition_table
+            )
 
-    # Combine the UCB scores and Minimax values with a weighted sum
     combined_scores = (1 - alpha) * ucb_scores + alpha * minimax_values
-
-    # Exclude illegal actions by setting the combined scores to -9999
     combined_scores = np.where(legal_actions == 1, combined_scores, -9999)
-    print(f"Combined scores: {combined_scores}")
+    print(f"Best Child: Combined scores: {combined_scores}")
 
-    # Select the move with the highest combined score
-    move = np.argmax(combined_scores)
-    print(f"Selected move: {move}")
+    legal_moves = np.where(legal_actions == 1)[0]
+    if len(legal_moves) == 0:
+        raise ValueError("No legal moves available")
 
-    assert legal_actions[move] == 1
+    move = legal_moves[np.argmax(combined_scores[legal_moves])]
+    print(f"Best Child: Selected move: {move}")
 
+    # Create the child node if it doesn't exist
     if move not in node.children:
         node.children[move] = Node(to_play=child_to_play, num_actions=node.num_actions, move=move, parent=node)
 
@@ -299,7 +303,7 @@ def expand(node: Node, prior_prob: np.ndarray) -> None:
     Raises:
         ValueError:
             if node instance already expanded.
-            if input argument `prior` is not a valid 1D float numpy.array.
+            if input argument `prior_prob` is not a valid 1D float numpy.array.
     """
     if node.is_expanded:
         raise RuntimeError('Node already expanded.')
@@ -479,7 +483,15 @@ def uct_search(
     if root_noise:
         add_dirichlet_noise(root_node, root_legal_actions)
 
-    while root_node.N < num_simulations:
+    # Adjust num_simulations based on tactical complexity
+    if isinstance(env, GoEnv):
+        complexity = env.assess_tactical_complexity()
+        adjusted_simulations = int(num_simulations * (1 + complexity / 100))
+        print(f"UCT Search: Tactical complexity: {complexity}, Adjusted simulations: {adjusted_simulations}")
+    else:
+        adjusted_simulations = num_simulations
+
+    while root_node.N < adjusted_simulations:
         node = root_node
 
         # Make sure do not touch the actual environment.
@@ -553,6 +565,8 @@ def uct_search(
         best_child_Q = -next_root_node.Q
 
     assert root_legal_actions[move] == 1
+
+    print(f"UCT Search: Final move selected: {move}, Search policy: {search_pi}")
 
     return (move, search_pi, root_node.Q, best_child_Q, next_root_node)
 

@@ -66,21 +66,25 @@ from alpha_zero.utils.util import create_logger
 
 
 def main():
+    """Main function to set up and run the Go game evaluation."""
     set_seed(FLAGS.seed)
     logger = create_logger()
 
+    # Determine the runtime device (CPU, CUDA, or MPS)
     runtime_device = 'cpu'
     if torch.cuda.is_available():
         runtime_device = 'cuda'
     elif torch.backends.mps.is_available():
         runtime_device = 'mps'
 
+    # Create the Go environment
     eval_env = GoEnv(komi=FLAGS.komi, num_stack=FLAGS.num_stack)
 
     input_shape = eval_env.observation_space.shape
     num_actions = eval_env.action_space.n
 
     def network_builder():
+        """Build and return an AlphaZeroNet instance."""
         return AlphaZeroNet(
             input_shape,
             num_actions,
@@ -90,6 +94,7 @@ def main():
         )
 
     def load_checkpoint_for_net(network, ckpt_file, device):
+        """Load a checkpoint for the given network."""
         if ckpt_file and os.path.isfile(ckpt_file):
             loaded_state = torch.load(ckpt_file, map_location=torch.device(device))
             network.load_state_dict(loaded_state['network'])
@@ -97,6 +102,7 @@ def main():
             logger.warning(f'Invalid checkpoint file "{ckpt_file}"')
 
     def mcts_player_builder(ckpt_file, device):
+        """Build and return an MCTS player with the specified checkpoint."""
         network = network_builder().to(device)
         disable_auto_grad(network)
         load_checkpoint_for_net(network, ckpt_file, device)
@@ -111,23 +117,26 @@ def main():
             deterministic=True,
         )
 
-    # Wrap MCTS player for the GUI program
     def wrap_player(mcts_player) -> int:
+        """Wrap the MCTS player for use in the GUI program."""
         def act(env):
             action, *_ = mcts_player(env, None, FLAGS.c_puct_base, FLAGS.c_puct_init, False)
             return action
 
         return act
 
+    # Create and wrap the white player
     white_player = mcts_player_builder(FLAGS.white_ckpt, runtime_device)
     white_player = wrap_player(white_player)
 
+    # Create and wrap the black player (human or AI)
     if FLAGS.human_vs_ai:
         black_player = 'human'
     else:
         black_player = mcts_player_builder(FLAGS.black_ckpt, runtime_device)
         black_player = wrap_player(black_player)
 
+    # Create and start the game GUI
     game_gui = BoardGameGui(
         eval_env,
         black_player=black_player,

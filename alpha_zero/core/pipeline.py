@@ -127,6 +127,8 @@ def create_mcts_player(
         root_node: Node,
         c_puct_base: float,
         c_puct_init: float,
+        minimax_depth:int,
+        minimax_weight: float,
         warm_up: bool = False,
     ) -> Tuple[int, np.ndarray, float, float, Node]:
         if num_parallel > 1:
@@ -141,6 +143,8 @@ def create_mcts_player(
                 root_noise=root_noise,
                 warm_up=warm_up,
                 deterministic=deterministic,
+                minimax_depth=minimax_depth,
+                minimax_weight=minimax_weight,
             )
         else:
             return uct_search(
@@ -153,6 +157,8 @@ def create_mcts_player(
                 root_noise=root_noise,
                 warm_up=warm_up,
                 deterministic=deterministic,
+                minimax_depth=minimax_depth,
+                minimax_weight=minimax_weight,
             )
 
     return act

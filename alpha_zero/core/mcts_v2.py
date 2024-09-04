@@ -147,7 +147,7 @@ class Node:
         return isinstance(self.parent, Node)
 
 
-def depth_limited_minimax(
+def dymanic_depth_minimax(
         env: BoardGameEnv,
         eval_func: Callable[[np.ndarray], Tuple[Iterable[np.ndarray], Iterable[float]]],
         depth: int,
@@ -165,7 +165,7 @@ def depth_limited_minimax(
         for action in env.legal_actions:
             sim_env = copy.deepcopy(env)
             sim_env.step(action)
-            eval = depth_limited_minimax(sim_env, eval_func, depth - 1, alpha, beta, False)
+            eval = dymanic_depth_minimax(sim_env, eval_func, depth - 1, alpha, beta, False)
             max_eval = max(max_eval, eval)
             alpha = max(alpha, eval)
             if beta <= alpha:
@@ -178,7 +178,7 @@ def depth_limited_minimax(
         for action in env.legal_actions:
             sim_env = copy.deepcopy(env)
             sim_env.step(action)
-            eval = depth_limited_minimax(sim_env, eval_func, depth - 1, alpha, beta, True)
+            eval = dymanic_depth_minimax(sim_env, eval_func, depth - 1, alpha, beta, True)
             min_eval = min(min_eval, eval)
             beta = min(beta, eval)
             if beta <= alpha:
@@ -466,7 +466,7 @@ def uct_search(
 
         # Phase 2 - Expand and evaluation
         if node.depth >= minimax_depth:
-            minimax_value = depth_limited_minimax(sim_env, eval_func, minimax_depth - node.depth)
+            minimax_value = dymanic_depth_minimax(sim_env, eval_func, minimax_depth - node.depth)
             node.child_minimax[node.move] = minimax_value
             value = minimax_value
         else:
@@ -685,7 +685,7 @@ def parallel_uct_search(
                     continue
 
                 if leaf.depth >= minimax_depth:
-                    minimax_value = depth_limited_minimax(sim_env, eval_func, minimax_depth - leaf.depth)
+                    minimax_value = dymanic_depth_minimax(sim_env, eval_func, minimax_depth - leaf.depth)
                     leaf.child_minimax[leaf.move] = minimax_value
                     value = minimax_value
                 else:

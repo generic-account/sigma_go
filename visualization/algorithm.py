@@ -2,6 +2,7 @@ import sente
 import random
 from visualization.katago import KataGo
 
+# START OF SIGMAGO + ALPHA GO PREP ########
 import os
 os.environ['BOARD_SIZE'] = '9'
 import sys
@@ -14,6 +15,7 @@ converter = CoordsConvertor(9)
 from alpha_zero.envs.go import GoEnv
 from alpha_zero.core.network import AlphaZeroNet
 from alpha_zero.core.pipeline import create_mcts_player, disable_auto_grad
+from alpha_zero.core.sg_pipeline import create_mcts_player as create_mctsmm_player
 
 runtime_device = 'cpu'
 if torch.cuda.is_available():
@@ -38,20 +40,32 @@ def load_checkpoint_for_net(network, ckpt_file, device):
     loaded_state = torch.load(ckpt_file, map_location=torch.device(device))
     network.load_state_dict(loaded_state['network'])
 
-def mcts_player_builder(ckpt_file, device):
+def mcts_player_builder(ckpt_file, device, minimax=False):
     network = network_builder().to(device)
     disable_auto_grad(network)
     load_checkpoint_for_net(network, ckpt_file, device)
     network.eval()
 
-    return create_mcts_player(
-        network=network,
-        device=device,
-        num_simulations=400,
-        num_parallel=8,
-        root_noise=False,
-        deterministic=True,
-    )
+    if minimax:
+        return create_mctsmm_player(
+            network=network,
+            device=device,
+            num_simulations=400,
+            num_parallel=8,
+            root_noise=False,
+            deterministic=True,
+        )
+    else:
+        return create_mcts_player(
+            network=network,
+            device=device,
+            num_simulations=400,
+            num_parallel=8,
+            root_noise=False,
+            deterministic=True,
+        )
+
+# END OF SIGMAGO + ALPHAGO PREP #######
 
 class Info:
     def __init__(self, size, pDist, passProb, value):
@@ -68,6 +82,24 @@ class Info:
         self.passProb = passProb
         self.value = value
         
+def agEvaluate(moves, size) -> Info:
+    if (size == 19):
+        ans = [[0 for _ in range(size)] for _ in range(size)]
+        for i in range(20):
+            ans[random.randint(0, size-1)][random.randint(0, size-1)] = random.random()
+        return Info(size, ans, random.random(), random.random())
+    else:
+        eval_env.reset()
+        for move in moves:
+            if move == "pass":
+                eval_env.step(81);
+            else:
+                eval_env.step(converter.to_flat(move));
+        query = mcts_player_builder("checkpoints/go/9x9/training_steps_160000.ckpt", runtime_device, False)(eval_env, None, 19652, 1.25)
+        pDist = query[1]
+        passProb = (pDist[-1] + 100) % 100
+        pDist = pDist[:81].reshape(9, 9);
+        return Info(size, pDist, passProb, query[2]);
 
 def sgEvaluate(moves, size) -> Info:
     if (size == 19):
@@ -82,14 +114,14 @@ def sgEvaluate(moves, size) -> Info:
                 eval_env.step(81);
             else:
                 eval_env.step(converter.to_flat(move));
-        query = mcts_player_builder("checkpoints/go/9x9/training_steps_160000.ckpt", runtime_device)(eval_env, None, 19652, 1.25)
+        query = mcts_player_builder("checkpoints/go/9x9/training_steps_160000.ckpt", runtime_device, True)(eval_env, None, 19652, 1.25, 10, 0.5)
         pDist = query[1]
         passProb = (pDist[-1] + 100) % 100
         pDist = pDist[:81].reshape(9, 9);
         return Info(size, pDist, passProb, query[2]);
 
 
-def adversaryEvaluate(moves, size) -> Info:
+def kgEvaluate(moves, size) -> Info:
     # add paths to katago executable, analysis config, and model bin.gz file
     katago = KataGo("/opt/homebrew/Cellar/katago/1.14.1/bin/katago", "/Users/LIMSOKCHEA/.katago/default_analysis.cfg", "/Users/LIMSOKCHEA/.katago/default_model.bin.gz")
 

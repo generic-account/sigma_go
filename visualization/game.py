@@ -4,7 +4,7 @@ import random
 from PyQt6.QtWidgets import *
 from PyQt6.QtGui import *
 from PyQt6.QtCore import *
-from visualization.algorithm import Info, sgEvaluate, adversaryEvaluate
+from visualization.algorithm import Info, sgEvaluate, agEvaluate, kgEvaluate
 from visualization.tromptaylor import convertBoard, tromptaylor
 
 class Node:
@@ -33,13 +33,30 @@ class Node:
             self.sgData = sgEvaluate(moves, size)
     def needAdversaryData(self):
         if self.adversaryData == None:
-            moves = []
-            node = self
-            while node.move != None:
-                moves.append(["W" if node.turn % 2 == 0 else "B", str(node.move)])
-                node = node.parent
-            moves.reverse()
-            self.adversaryData = adversaryEvaluate(moves, size)
+            if adversary == "KataGo":
+                moves = []
+                node = self
+                while node.move != None:
+                    moves.append(["W" if node.turn % 2 == 0 else "B", str(node.move)])
+                    node = node.parent
+                moves.reverse()
+                self.adversaryData = kgEvaluate(moves, size)
+            elif adversary == "SigmaGo":
+                moves = []
+                node = self
+                while node.move != None:
+                    moves.append(node.move)
+                    node = node.parent
+                moves.reverse()
+                self.adversaryData = sgEvaluate(moves, size)
+            elif adversary == "AlphaGo":
+                moves = []
+                node = self
+                while node.move != None:
+                    moves.append(node.move)
+                    node = node.parent
+                moves.reverse()
+                self.adversaryData = agEvaluate(moves, size)
     def toggleSgData(self):
         self.needSgData()
         self.showSgData = not self.showSgData
@@ -227,7 +244,7 @@ class Board(QFrame):
                 self.squares[i][j].branchNum = -1
         for i in range(len(game.get_branches())):
             move = game.get_branches()[i];
-            if (move.get_x() == size and move.get_y() == size):       
+            if (move.get_x() == 19 and move.get_y() == 19):       
                 self.passButton.branchNum = i
             else:
                 self.squares[move.get_x()][move.get_y()].branchNum = i
@@ -274,32 +291,33 @@ class Button(QPushButton):
             for _ in range(10):
                 Button.playOut()
     def playOut():
-        if currentNode.turn % 2 == 0:
-            currentNode.needSgData()
-            r = random.random()
-            sum = currentNode.sgData.passProb;
-            if r < sum: # pass
-                board.passButton.mousePressEvent(None)
-                return
-            for i in range(size):
-                for j in range(size):
-                    sum += currentNode.sgData.pDist[i][j]
-                    if r < sum:
-                        board.squares[i][j].mousePressEvent(None)
-                        return
-        else:
-            currentNode.needAdversaryData()
-            r = random.random()
-            sum = currentNode.adversaryData.passProb;
-            if r < sum:
-                board.passButton.mousePressEvent(None)
-                return
-            for i in range(size):
-                for j in range(size):
-                    sum += currentNode.adversaryData.pDist[i][j]
-                    if r < sum:
-                        board.squares[i][j].mousePressEvent(None)
-                        return
+        if currentNode.passes != 2 and not currentNode.resigned:
+            if currentNode.turn % 2 == 0:
+                currentNode.needSgData()
+                r = random.random()
+                sum = currentNode.sgData.passProb;
+                if r < sum: # pass
+                    board.passButton.mousePressEvent(None)
+                    return
+                for i in range(size):
+                    for j in range(size):
+                        sum += currentNode.sgData.pDist[i][j]
+                        if r < sum:
+                            board.squares[i][j].mousePressEvent(None)
+                            return
+            else:
+                currentNode.needAdversaryData()
+                r = random.random()
+                sum = currentNode.adversaryData.passProb;
+                if r < sum:
+                    board.passButton.mousePressEvent(None)
+                    return
+                for i in range(size):
+                    for j in range(size):
+                        sum += currentNode.adversaryData.pDist[i][j]
+                        if r < sum:
+                            board.squares[i][j].mousePressEvent(None)
+                            return
 
 class MainWindow(QFrame):
     instance = None
@@ -348,6 +366,7 @@ class ChooseBoardWindow(QFrame):
         layout.addWidget(self.OptionButton("Make a 19x19 Board", 19));
     
         self.setLayout(layout)
+        self.show()
     class OptionButton(QPushButton):
         def __init__(self, text, size):
             super().__init__(text)
@@ -355,15 +374,37 @@ class ChooseBoardWindow(QFrame):
         def mousePressEvent(self, event: QMouseEvent) -> None:
             global size
             size = self.size
+            global window
+            window = ChooseAdversaryWindow()
+
+class ChooseAdversaryWindow(QFrame):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Choose Board")
+        self.setFixedSize(500, 500)
+        
+        layout = QVBoxLayout()
+        layout.addWidget(self.OptionButton("SigmaGo"));
+        layout.addWidget(self.OptionButton("AlphaGo"));
+        layout.addWidget(self.OptionButton("KataGo"));
+    
+        self.setLayout(layout)
+        self.show()
+    class OptionButton(QPushButton):
+        def __init__(self, text):
+            super().__init__(text)
+            self.type = text
+            self.size = size
+        def mousePressEvent(self, event: QMouseEvent) -> None:
+            global adversary
+            adversary = self.type
+            global window
             window = MainWindow()
-            window.show()
-            
 
 
 
 app = QApplication([])
 
 window = ChooseBoardWindow();
-window.show()
 
 sys.exit(app.exec())

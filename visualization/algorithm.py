@@ -15,7 +15,6 @@ converter = CoordsConvertor(9)
 from alpha_zero.envs.go import GoEnv
 from alpha_zero.core.network import AlphaZeroNet
 from alpha_zero.core.pipeline import create_mcts_player, disable_auto_grad
-from alpha_zero.core.sg_pipeline import create_mcts_player as create_mctsmm_player
 
 runtime_device = 'cpu'
 if torch.cuda.is_available():
@@ -46,24 +45,14 @@ def mcts_player_builder(ckpt_file, device, minimax=False):
     load_checkpoint_for_net(network, ckpt_file, device)
     network.eval()
 
-    if minimax:
-        return create_mctsmm_player(
-            network=network,
-            device=device,
-            num_simulations=400,
-            num_parallel=8,
-            root_noise=False,
-            deterministic=True,
-        )
-    else:
-        return create_mcts_player(
-            network=network,
-            device=device,
-            num_simulations=400,
-            num_parallel=8,
-            root_noise=False,
-            deterministic=True,
-        )
+    return create_mcts_player(
+        network=network,
+        device=device,
+        num_simulations=400,
+        num_parallel=8,
+        root_noise=False,
+        deterministic=True,
+    )
 
 # END OF SIGMAGO + ALPHAGO PREP #######
 
@@ -95,7 +84,7 @@ def agEvaluate(moves, size) -> Info:
                 eval_env.step(81);
             else:
                 eval_env.step(converter.to_flat(move));
-        query = mcts_player_builder("checkpoints/go/9x9/training_steps_160000.ckpt", runtime_device, False)(eval_env, None, 19652, 1.25)
+        query = mcts_player_builder("checkpoints/go/9x9/training_steps_160000.ckpt", runtime_device, False)(eval_env, None, 19652, 1.25, 0)
         pDist = query[1]
         passProb = (pDist[-1] + 100) % 100
         pDist = pDist[:81].reshape(9, 9);
@@ -114,7 +103,7 @@ def sgEvaluate(moves, size) -> Info:
                 eval_env.step(81);
             else:
                 eval_env.step(converter.to_flat(move));
-        query = mcts_player_builder("checkpoints/go/9x9/training_steps_160000.ckpt", runtime_device, True)(eval_env, None, 19652, 1.25, 10, 0.5)
+        query = mcts_player_builder("checkpoints/go/9x9/training_steps_160000.ckpt", runtime_device, True)(eval_env, None, 19652, 1.25, 1000)
         pDist = query[1]
         passProb = (pDist[-1] + 100) % 100
         pDist = pDist[:81].reshape(9, 9);

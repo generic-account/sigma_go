@@ -38,14 +38,15 @@ flags.DEFINE_string(
     'Load the checkpoint file for white player.',
 )
 
-flags.DEFINE_integer('num_simulations', 800, 'Number of iterations per MCTS search.')
+flags.DEFINE_integer('num_simulations', 400, 'Number of iterations per MCTS search.')
 flags.DEFINE_integer(
     'num_parallel',
     8,
     'Number of leaves to collect before using the neural network to evaluate the positions during MCTS search, 1 means no parallel search.',
 )
 
-flags.DEFINE_integer('minimax_depth', 5, 'Depth of minimax search')
+flags.DEFINE_integer('minimax_depth', 2, 'Depth of minimax search')
+
 
 flags.DEFINE_float('c_puct_base', 19652, 'Exploration constants balancing priors vs. search values.')
 flags.DEFINE_float('c_puct_init', 1.25, 'Exploration constants balancing priors vs. search values.')
@@ -109,14 +110,16 @@ def main():
             device=device,
             num_simulations=FLAGS.num_simulations,
             num_parallel=FLAGS.num_parallel,
+            minimax_depth=FLAGS.minimax_depth,
             root_noise=False,
             deterministic=True,
+            use_minimax=True
         )
 
     # Wrap MCTS player for the GUI program
     def wrap_player(mcts_player) -> int:
         def act(env):
-            action, *_ = mcts_player(env, None, FLAGS.c_puct_base, FLAGS.c_puct_init, FLAGS.minimax_depth, False)
+            action, *_ = mcts_player(env, None, FLAGS.c_puct_base, FLAGS.c_puct_init, False)
             return action
 
         return act

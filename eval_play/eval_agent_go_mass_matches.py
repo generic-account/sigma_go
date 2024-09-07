@@ -124,7 +124,7 @@ def play_one_match(
             active_player = black_player
         else:
             active_player = white_player
-        move, *_ = active_player(env, None, c_puct_base, c_puct_init)
+        move, *_ = active_player(env, None, c_puct_base, c_puct_init,)
         _, _, done, _ = env.step(move)
         if done:
             break

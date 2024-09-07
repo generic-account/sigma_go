@@ -85,8 +85,10 @@ def create_mcts_player(
         device: torch.device,
         num_simulations: int,
         num_parallel: int,
+        minimax_depth: int,
         root_noise: bool = False,
         deterministic: bool = False,
+        use_minimax: bool = False,
 ) -> Callable[[BoardGameEnv, Node, float, float, bool], Tuple[int, np.ndarray, float, float, Node]]:
     @torch.no_grad()
     def eval_position(
@@ -127,14 +129,13 @@ def create_mcts_player(
             root_node: Node,
             c_puct_base: float,
             c_puct_init: float,
-            minimax_depth: int,
             warm_up: bool = False,
     ) -> Tuple[int, np.ndarray, float, float, Node]:
         if num_parallel > 1:
             return parallel_uct_search(env=env, eval_func=eval_position, root_node=root_node, c_puct_base=c_puct_base,
                                        c_puct_init=c_puct_init, num_simulations=num_simulations,
-                                       num_parallel=num_parallel, root_noise=root_noise, warm_up=warm_up,
-                                       deterministic=deterministic)
+                                       num_parallel=num_parallel, minimax_depth=minimax_depth, root_noise=root_noise,
+                                       warm_up=warm_up, deterministic=deterministic, use_minimax=use_minimax)
         else:
             return uct_search(
                 env=env,
@@ -147,6 +148,7 @@ def create_mcts_player(
                 warm_up=warm_up,
                 deterministic=deterministic,
                 minimax_depth=minimax_depth,
+                use_minimax=use_minimax,
             )
 
     return act

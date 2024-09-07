@@ -347,11 +347,13 @@ def uct_search(
         root_node: Node,
         c_puct_base: float,
         c_puct_init: float,
+        minimax_depth: int,
         num_simulations: int = 800,
         root_noise: bool = False,
         warm_up: bool = False,
         deterministic: bool = False,
-        minimax_depth: int = 2,
+        use_minimax: bool = False,
+
 ) -> Tuple[int, np.ndarray, float, float, Node]:
     """Single-threaded Upper Confidence Bound (UCB) for Trees (UCT) search without any rollout.
 
@@ -449,8 +451,8 @@ def uct_search(
             continue
 
         # Phase 2 - Expand and evaluation
-        if node.depth >= minimax_depth:
-            minimax_value = depth_limited_minimax(sim_env, eval_func, minimax_depth - node.depth)
+        if use_minimax:
+            minimax_value = depth_limited_minimax(sim_env, eval_func, minimax_depth)
             value = minimax_value
             backup(node, value)
         else:
@@ -534,10 +536,11 @@ def parallel_uct_search(
         c_puct_init: float,
         num_simulations: int,
         num_parallel: int,
+        minimax_depth:int,
         root_noise: bool = False,
         warm_up: bool = False,
         deterministic: bool = False,
-        minimax_depth: int = 2,
+        use_minimax: bool = False,
 ) -> Tuple[int, np.ndarray, float, float, Node]:
     """Single-threaded Upper Confidence Bound (UCB) for Trees (UCT) search without any rollout.
 
@@ -603,6 +606,7 @@ def parallel_uct_search(
         backup(root_node, value)
 
     assert root_node.to_play == env.to_play
+    print(f'root node depth: {root_node.depth}')
 
     root_legal_actions = env.legal_actions
 
@@ -660,8 +664,9 @@ def parallel_uct_search(
                 if leaf.is_expanded:
                     continue
 
-                if leaf.depth >= minimax_depth:
-                    minimax_value = depth_limited_minimax(sim_env, eval_func, minimax_depth - leaf.depth)
+                if use_minimax:
+                    print(f"Leaf depth: {leaf.depth}, Minimax depth: {minimax_depth}")
+                    minimax_value = depth_limited_minimax(sim_env, eval_func, minimax_depth)
                     value = minimax_value
                     backup(leaf, value)
                 else:

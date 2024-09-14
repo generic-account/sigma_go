@@ -43,7 +43,7 @@ flags.DEFINE_string(
     'Load the checkpoint file for white player.',
 )
 
-flags.DEFINE_integer('num_simulations', 200, 'Number of iterations per MCTS search.')
+flags.DEFINE_integer('num_simulations', 400, 'Number of iterations per MCTS search.')
 flags.DEFINE_integer(
     'num_parallel',
     8,
@@ -53,7 +53,7 @@ flags.DEFINE_integer(
 flags.DEFINE_float('c_puct_base', 19652, 'Exploration constants balancing priors vs. search values.')
 flags.DEFINE_float('c_puct_init', 1.25, 'Exploration constants balancing priors vs. search values.')
 
-flags.DEFINE_integer('num_games', 20, '')
+flags.DEFINE_integer('num_games', 10, '')
 
 flags.DEFINE_integer('num_processes', 16, 'Run the games using multiple child processes')
 
@@ -65,8 +65,10 @@ flags.DEFINE_string(
 
 flags.DEFINE_integer('seed', 1, 'Seed the runtime.')
 
-flags.DEFINE_integer('black_minimax_depth', 5, 'Depth of black minimax search')
+flags.DEFINE_integer('black_minimax_depth', 1, 'Depth of black minimax search')
 flags.DEFINE_integer('white_minimax_depth', 0, 'Depth of white minimax search')
+flags.DEFINE_integer('black_k_best', 10, 'Number of best moves to consider for black minimax search')
+flags.DEFINE_integer('white_k_best', 10, 'Number of best moves to consider for white minimax search')
 
 flags.register_validator('num_games', lambda x: x >= 1)
 
@@ -90,7 +92,7 @@ def load_checkpoint_for_net(network, ckpt_file, device):
         logging.warning(f'Invalid checkpoint file "{ckpt_file}"')
 
 
-def mcts_player_builder(network, ckpt_file, device):
+def mcts_player_builder(network, ckpt_file, device, depth, k_best):
     network = network.to(device)
     disable_auto_grad(network)
     load_checkpoint_for_net(network, ckpt_file, device)
@@ -103,6 +105,9 @@ def mcts_player_builder(network, ckpt_file, device):
         num_parallel=FLAGS.num_parallel,
         root_noise=False,
         deterministic=False,
+        use_minimax=True,
+        minimax_depth=depth,
+        k_best=k_best
     )
 
 
@@ -119,15 +124,11 @@ def play_one_match(
     c_puct_init,
     black_minimax_depth,
     white_minimax_depth,
+    black_k_best,
+    white_k_best,
 ):
-    black_player = mcts_player_builder(black_network, black_ckpt, device)
-    white_player = mcts_player_builder(white_network, white_ckpt, device)
-
-    def active_player_act():
-        if active_player == black_player:
-            return active_player(env, None, c_puct_base, c_puct_init, black_minimax_depth)
-        elif active_player == white_player:
-            return active_player(env, None, c_puct_base, c_puct_init, white_minimax_depth)
+    black_player = mcts_player_builder(black_network, black_ckpt, device, black_minimax_depth, black_k_best)
+    white_player = mcts_player_builder(white_network, white_ckpt, device, white_minimax_depth, white_k_best)
 
     _ = env.reset()
     while True:
@@ -135,7 +136,7 @@ def play_one_match(
             active_player = black_player
         else:
             active_player = white_player
-        move, *_ = active_player_act()
+        move, *_ = active_player(env, None, c_puct_base, c_puct_init)
         _, _, done, _ = env.step(move)
         if done:
             break
@@ -219,6 +220,8 @@ def main():
             FLAGS.c_puct_init,
             FLAGS.black_minimax_depth,
             FLAGS.white_minimax_depth,
+            FLAGS.black_k_best,
+            FLAGS.white_k_best,
         )
         for i in range(FLAGS.num_games)
     ]

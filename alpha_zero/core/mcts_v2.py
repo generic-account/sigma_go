@@ -46,6 +46,7 @@ In this case, a max(-0.8, -0.3) will give us the correct results for black playe
 import copy
 import collections
 import math
+import time
 from typing import Callable, Tuple, Mapping, Iterable, Any
 import numpy as np
 
@@ -65,12 +66,12 @@ class Node:
     """Node in the MCTS search tree."""
 
     def __init__(
-            self,
-            to_play: int,
-            num_actions: np.ndarray,
-            move: int = None,
-            parent: Any = None,
-            depth: int = 0,  # Added to keep track of depth of the node in MCTS tree
+        self,
+        to_play: int,
+        num_actions: np.ndarray,
+        move: int = None,
+        parent: Any = None,
+        depth: int = 0,  # Added to keep track of depth of the node in MCTS tree
     ) -> None:
         """
         Args:
@@ -141,12 +142,13 @@ class Node:
 
 
 def depth_limited_minimax(
-        env: BoardGameEnv,
-        eval_func: Callable[[np.ndarray], Tuple[Iterable[np.ndarray], Iterable[float]]],
-        depth: int,
-        alpha: float = -float('inf'),
-        beta: float = float('inf'),
-        maximizing_player: bool = True,
+    env: BoardGameEnv,
+    eval_func: Callable[[np.ndarray], Tuple[Iterable[np.ndarray], Iterable[float]]],
+    depth: int,
+    k_best: int = None,
+    alpha: float = -float('inf'),
+    beta: float = float('inf'),
+    maximizing_player: bool = True,
 ) -> float:
     if depth == 0 or env.is_game_over():
         obs = env.observation()
@@ -154,12 +156,33 @@ def depth_limited_minimax(
         assert isinstance(value, float), f"Expected scalar, got {type(value)}"
         return value
 
+    legal_actions = np.where(env.legal_actions == 1)[0]
+
+    # Move ordering
+    move_scores = []
+    for action in legal_actions:
+        sim_env = copy.deepcopy(env)
+        sim_env.step(action)
+        obs = sim_env.observation()
+        _, value = eval_func(obs, False)
+        move_scores.append((action, value))
+
+    # Sort moves by value
+    if maximizing_player:
+        move_scores.sort(key=lambda x: x[1], reverse=True)
+    else:
+        move_scores.sort(key=lambda x: x[1])
+
+    if k_best is not None:
+        move_scores = move_scores[:k_best]
+        # print(f"Move scores: {move_scores}")
+
     if maximizing_player:
         max_eval = -float('inf')
-        for action in np.where(env.legal_actions == 1)[0]:
+        for action, _ in move_scores:
             sim_env = copy.deepcopy(env)
             sim_env.step(action)
-            eval = depth_limited_minimax(sim_env, eval_func, depth - 1, alpha, beta, False)
+            eval = depth_limited_minimax(sim_env, eval_func, depth - 1, k_best, alpha, beta, False)
             max_eval = max(max_eval, eval)
             alpha = max(alpha, eval)
             if beta <= alpha:
@@ -168,10 +191,10 @@ def depth_limited_minimax(
         return max_eval
     else:
         min_eval = float('inf')
-        for action in np.where(env.legal_actions == 1)[0]:
+        for action, _ in move_scores:
             sim_env = copy.deepcopy(env)
             sim_env.step(action)
-            eval = depth_limited_minimax(sim_env, eval_func, depth - 1, alpha, beta, True)
+            eval = depth_limited_minimax(sim_env, eval_func, depth - 1, k_best, alpha, beta, True,)
             min_eval = min(min_eval, eval)
             beta = min(beta, eval)
             if beta <= alpha:
@@ -181,11 +204,11 @@ def depth_limited_minimax(
 
 
 def best_child(
-        node: Node,
-        legal_actions: np.ndarray,
-        c_puct_base: float,
-        c_puct_init: float,
-        child_to_play: int,
+    node: Node,
+    legal_actions: np.ndarray,
+    c_puct_base: float,
+    c_puct_init: float,
+    child_to_play: int,
 ) -> Node:
     """Returns best child node with maximum action value Q plus an upper confidence bound U.
     And creates the selected best child node if not already exists.
@@ -216,14 +239,12 @@ def best_child(
     scores = np.where(legal_actions == 1, hybrid_ucb_scores, -9999)
     move = np.argmax(scores)
 
-    # (f"Hybrid scores: {hybrid_ucb_scores}")
-    # print(f"Selected move: {move}")
-
     assert legal_actions[move] == 1
 
     if move not in node.children:
-        node.children[move] = Node(to_play=child_to_play, num_actions=node.num_actions, move=move, parent=node,
-                                   depth=node.depth + 1)
+        node.children[move] = Node(
+            to_play=child_to_play, num_actions=node.num_actions, move=move, parent=node, depth=node.depth + 1
+        )
 
     return node.children[move]
 
@@ -243,9 +264,9 @@ def expand(node: Node, prior_prob: np.ndarray) -> None:
     if node.is_expanded:
         raise RuntimeError('Node already expanded.')
     if (
-            not isinstance(prior_prob, np.ndarray)
-            or len(prior_prob.shape) != 1
-            or prior_prob.dtype not in (np.float32, np.float64)
+        not isinstance(prior_prob, np.ndarray)
+        or len(prior_prob.shape) != 1
+        or prior_prob.dtype not in (np.float32, np.float64)
     ):
         raise ValueError(f'Expect `prior_prob` to be a 1D float numpy.array, got {prior_prob}')
 
@@ -342,16 +363,18 @@ def generate_search_policy(child_N: np.ndarray, temperature: float, legal_action
 
 
 def uct_search(
-        env: BoardGameEnv,
-        eval_func: Callable[[np.ndarray, bool], Tuple[Iterable[np.ndarray], Iterable[float]]],
-        root_node: Node,
-        c_puct_base: float,
-        c_puct_init: float,
-        num_simulations: int = 800,
-        root_noise: bool = False,
-        warm_up: bool = False,
-        deterministic: bool = False,
-        minimax_depth: int = 2,
+    env: BoardGameEnv,
+    eval_func: Callable[[np.ndarray, bool], Tuple[Iterable[np.ndarray], Iterable[float]]],
+    root_node: Node,
+    c_puct_base: float,
+    c_puct_init: float,
+    minimax_depth: int,
+    k_best: int,
+    num_simulations: int = 800,
+    root_noise: bool = False,
+    warm_up: bool = False,
+    deterministic: bool = False,
+    use_minimax: bool = False,
 ) -> Tuple[int, np.ndarray, float, float, Node]:
     """Single-threaded Upper Confidence Bound (UCB) for Trees (UCT) search without any rollout.
 
@@ -449,8 +472,8 @@ def uct_search(
             continue
 
         # Phase 2 - Expand and evaluation
-        if node.depth >= minimax_depth:
-            minimax_value = depth_limited_minimax(sim_env, eval_func, minimax_depth - node.depth)
+        if use_minimax:
+            minimax_value = depth_limited_minimax(sim_env, eval_func, minimax_depth, k_best)
             value = minimax_value
             backup(node, value)
         else:
@@ -473,8 +496,7 @@ def uct_search(
     else:
         # Sample an action
         # Prevent the agent to select pass move during opening moves
-        while move is None or (warm_up and env.has_pass_move and move == env.pass_move) or root_legal_actions[
-                              move] != 1:
+        while move is None or (warm_up and env.has_pass_move and move == env.pass_move) or root_legal_actions[move] != 1:
             move = np.random.choice(np.arange(search_pi.shape[0]), p=search_pi)
 
     if move in root_node.children:
@@ -527,17 +549,19 @@ def revert_virtual_loss(node: Node) -> None:
 
 
 def parallel_uct_search(
-        env: BoardGameEnv,
-        eval_func: Callable[[np.ndarray], Tuple[Iterable[np.ndarray], Iterable[float]]],
-        root_node: Node,
-        c_puct_base: float,
-        c_puct_init: float,
-        num_simulations: int,
-        num_parallel: int,
-        root_noise: bool = False,
-        warm_up: bool = False,
-        deterministic: bool = False,
-        minimax_depth: int = 2,
+    env: BoardGameEnv,
+    eval_func: Callable[[np.ndarray], Tuple[Iterable[np.ndarray], Iterable[float]]],
+    root_node: Node,
+    c_puct_base: float,
+    c_puct_init: float,
+    num_simulations: int,
+    num_parallel: int,
+    minimax_depth: int,
+    k_best: int,
+    root_noise: bool = False,
+    warm_up: bool = False,
+    deterministic: bool = False,
+    use_minimax: bool = False,
 ) -> Tuple[int, np.ndarray, float, float, Node]:
     """Single-threaded Upper Confidence Bound (UCB) for Trees (UCT) search without any rollout.
 
@@ -595,6 +619,7 @@ def parallel_uct_search(
     if env.is_game_over():
         raise RuntimeError('Game is over.')
 
+    start_time = time.time()
     # Create root node
     if root_node is None:
         prior_prob, value = eval_func(env.observation(), False)
@@ -652,6 +677,11 @@ def parallel_uct_search(
             batched_nodes, batched_obs = map(list, zip(*leaves))
             prior_probs, values = eval_func(np.stack(batched_obs, axis=0), True)
 
+            if use_minimax:
+                # print(f"Leaf depth: {leaf.depth}, Minimax depth: {minimax_depth}")
+                minimax_value = depth_limited_minimax(sim_env, eval_func, minimax_depth, k_best)
+                # print(f"Minimax value: {value}")
+
             for leaf, prior_prob, value in zip(batched_nodes, prior_probs, values):
                 revert_virtual_loss(leaf)
 
@@ -660,10 +690,9 @@ def parallel_uct_search(
                 if leaf.is_expanded:
                     continue
 
-                if leaf.depth >= minimax_depth:
-                    minimax_value = depth_limited_minimax(sim_env, eval_func, minimax_depth - leaf.depth)
-                    value = minimax_value
-                    backup(leaf, value)
+                if use_minimax:
+                    m_value = minimax_value
+                    backup(leaf, m_value)
                 else:
                     expand(leaf, prior_prob)
 
@@ -683,8 +712,7 @@ def parallel_uct_search(
     else:
         # Sample an action
         # Prevent the agent to select pass move during opening moves
-        while move is None or (warm_up and env.has_pass_move and move == env.pass_move) or root_legal_actions[
-                              move] != 1:
+        while move is None or (warm_up and env.has_pass_move and move == env.pass_move) or root_legal_actions[move] != 1:
             move = np.random.choice(np.arange(search_pi.shape[0]), p=search_pi)
 
     if move in root_node.children:
@@ -700,5 +728,7 @@ def parallel_uct_search(
         best_child_Q = -next_root_node.Q
 
     assert root_legal_actions[move] == 1
+    end_time = time.time()
+    print(f"Time taken for search: {end_time - start_time}")
 
     return move, search_pi, root_node.Q, best_child_Q, next_root_node

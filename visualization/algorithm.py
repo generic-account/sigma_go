@@ -39,7 +39,7 @@ def load_checkpoint_for_net(network, ckpt_file, device):
     loaded_state = torch.load(ckpt_file, map_location=torch.device(device))
     network.load_state_dict(loaded_state['network'])
 
-def mcts_player_builder(ckpt_file, device, minimax=False):
+def mcts_player_builder(ckpt_file, device, depth):
     network = network_builder().to(device)
     disable_auto_grad(network)
     load_checkpoint_for_net(network, ckpt_file, device)
@@ -50,8 +50,10 @@ def mcts_player_builder(ckpt_file, device, minimax=False):
         device=device,
         num_simulations=400,
         num_parallel=8,
+        minimax_depth=depth,
         root_noise=False,
         deterministic=True,
+        use_minimax=False
     )
 
 # END OF SIGMAGO + ALPHAGO PREP #######
@@ -84,7 +86,7 @@ def agEvaluate(moves, size) -> Info:
                 eval_env.step(81);
             else:
                 eval_env.step(converter.to_flat(move));
-        query = mcts_player_builder("checkpoints/go/9x9/training_steps_160000.ckpt", runtime_device, False)(eval_env, None, 19652, 1.25, 0)
+        query = mcts_player_builder("checkpoints/go/9x9/training_steps_160000.ckpt", runtime_device, 0)(eval_env, None, 19652, 1.25)
         pDist = query[1]
         passProb = (pDist[-1] + 100) % 100
         pDist = pDist[:81].reshape(9, 9);
@@ -103,7 +105,7 @@ def sgEvaluate(moves, size) -> Info:
                 eval_env.step(81);
             else:
                 eval_env.step(converter.to_flat(move));
-        query = mcts_player_builder("checkpoints/go/9x9/training_steps_160000.ckpt", runtime_device, True)(eval_env, None, 19652, 1.25, 1000)
+        query = mcts_player_builder("checkpoints/go/9x9/training_steps_160000.ckpt", runtime_device, 1)(eval_env, None, 19652, 1.25)
         pDist = query[1]
         passProb = (pDist[-1] + 100) % 100
         pDist = pDist[:81].reshape(9, 9);

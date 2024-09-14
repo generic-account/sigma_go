@@ -81,19 +81,20 @@ def _decode_bytes(b) -> str:
 
 
 def create_mcts_player(
-        network: torch.nn.Module,
-        device: torch.device,
-        num_simulations: int,
-        num_parallel: int,
-        minimax_depth: int,
-        root_noise: bool = False,
-        deterministic: bool = False,
-        use_minimax: bool = False,
+    network: torch.nn.Module,
+    device: torch.device,
+    num_simulations: int,
+    num_parallel: int,
+    minimax_depth: int,
+    k_best: int,
+    root_noise: bool = False,
+    deterministic: bool = False,
+    use_minimax: bool = False,
 ) -> Callable[[BoardGameEnv, Node, float, float, bool], Tuple[int, np.ndarray, float, float, Node]]:
     @torch.no_grad()
     def eval_position(
-            state: np.ndarray,
-            batched: bool = False,
+        state: np.ndarray,
+        batched: bool = False,
     ) -> Tuple[Iterable[np.ndarray], Iterable[float]]:
         """Give a game state tensor, returns the action probabilities
         and estimated state value from current player's perspective."""
@@ -125,17 +126,28 @@ def create_mcts_player(
         return pi, v
 
     def act(
-            env: BoardGameEnv,
-            root_node: Node,
-            c_puct_base: float,
-            c_puct_init: float,
-            warm_up: bool = False,
+        env: BoardGameEnv,
+        root_node: Node,
+        c_puct_base: float,
+        c_puct_init: float,
+        warm_up: bool = False,
     ) -> Tuple[int, np.ndarray, float, float, Node]:
         if num_parallel > 1:
-            return parallel_uct_search(env=env, eval_func=eval_position, root_node=root_node, c_puct_base=c_puct_base,
-                                       c_puct_init=c_puct_init, num_simulations=num_simulations,
-                                       num_parallel=num_parallel, minimax_depth=minimax_depth, root_noise=root_noise,
-                                       warm_up=warm_up, deterministic=deterministic, use_minimax=use_minimax)
+            return parallel_uct_search(
+                env=env,
+                eval_func=eval_position,
+                root_node=root_node,
+                c_puct_base=c_puct_base,
+                c_puct_init=c_puct_init,
+                num_simulations=num_simulations,
+                num_parallel=num_parallel,
+                minimax_depth=minimax_depth,
+                root_noise=root_noise,
+                warm_up=warm_up,
+                deterministic=deterministic,
+                use_minimax=use_minimax,
+                k_best=k_best,
+            )
         else:
             return uct_search(
                 env=env,
@@ -149,6 +161,7 @@ def create_mcts_player(
                 deterministic=deterministic,
                 minimax_depth=minimax_depth,
                 use_minimax=use_minimax,
+                k_best=k_best,
             )
 
     return act
@@ -160,28 +173,28 @@ def create_mcts_player(
 
 
 def run_selfplay_actor_loop(
-        seed: int,
-        rank: int,
-        network: torch.nn.Module,
-        device: torch.device,
-        data_queue: mp.Queue,
-        env: BoardGameEnv,
-        num_simulations: int,
-        num_parallel: int,
-        c_puct_base: float,
-        c_puct_init: float,
-        warm_up_steps: int,
-        check_resign_after_steps: int,
-        disable_resign_ratio: float,
-        save_sgf_dir: str,
-        save_sgf_interval: int,
-        logs_dir: str,
-        load_ckpt: str,
-        log_level: str,
-        var_ckpt: mp.Value,
-        var_resign_threshold: mp.Value,
-        ckpt_event: mp.Event,
-        stop_event: mp.Event,
+    seed: int,
+    rank: int,
+    network: torch.nn.Module,
+    device: torch.device,
+    data_queue: mp.Queue,
+    env: BoardGameEnv,
+    num_simulations: int,
+    num_parallel: int,
+    c_puct_base: float,
+    c_puct_init: float,
+    warm_up_steps: int,
+    check_resign_after_steps: int,
+    disable_resign_ratio: float,
+    save_sgf_dir: str,
+    save_sgf_interval: int,
+    logs_dir: str,
+    load_ckpt: str,
+    log_level: str,
+    var_ckpt: mp.Value,
+    var_resign_threshold: mp.Value,
+    ckpt_event: mp.Event,
+    stop_event: mp.Event,
 ) -> None:
     """Use the latest neural network to play against itself, and record the transitions for training."""
     assert num_simulations > 1
@@ -283,15 +296,15 @@ def run_selfplay_actor_loop(
 
 
 def play_and_record_one_game(
-        env: BoardGameEnv,
-        mcts_player: Any,
-        resign_disabled: bool,
-        c_puct_base: float,
-        c_puct_init: float,
-        warm_up_steps: int,
-        check_resign_after_steps: int,
-        resign_threshold: float,
-        logger: Any,
+    env: BoardGameEnv,
+    mcts_player: Any,
+    resign_disabled: bool,
+    c_puct_base: float,
+    c_puct_init: float,
+    warm_up_steps: int,
+    check_resign_after_steps: int,
+    resign_threshold: float,
+    logger: Any,
 ) -> Tuple[Iterable[Transition], Mapping[Text, Any]]:
     obs = env.reset()
     done = False
@@ -322,10 +335,10 @@ def play_and_record_one_game(
         to_plays.append(env.to_play)
 
         if (
-                env.has_resign_move
-                and env.steps > check_resign_after_steps
-                and root_Q < resign_threshold
-                and best_child_Q < resign_threshold
+            env.has_resign_move
+            and env.steps > check_resign_after_steps
+            and root_Q < resign_threshold
+            and best_child_Q < resign_threshold
         ):
             # Mark resigned player so we can compute false positive
             if marked_resign_player is None:
@@ -384,37 +397,37 @@ def play_and_record_one_game(
 
 
 def run_learner_loop(  # noqa: C901
-        seed: int,
-        network: torch.nn.Module,
-        optimizer: torch.optim.Optimizer,
-        lr_scheduler: torch.optim.lr_scheduler.MultiStepLR,
-        device: torch.device,
-        replay: UniformReplay,
-        logger: Any,
-        argument_data: bool,
-        batch_size: int,
-        disable_resign_ratio: float,
-        init_resign_threshold: float,
-        target_fp_rate: float,
-        reset_fp_interval: int,
-        no_resign_games: int,
-        min_games: int,
-        games_per_ckpt: int,
-        num_actors: int,
-        ckpt_interval: int,
-        log_interval: int,
-        save_replay_interval: int,
-        max_training_steps: int,
-        ckpt_dir: str,
-        logs_dir: str,
-        load_ckpt: str,
-        load_replay: str,
-        data_queue: mp.SimpleQueue,
-        var_ckpt: mp.Value,
-        var_resign_threshold: mp.Value,
-        ckpt_event: mp.Event,
-        stop_event: mp.Event,
-        lock=threading.Lock(),
+    seed: int,
+    network: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    lr_scheduler: torch.optim.lr_scheduler.MultiStepLR,
+    device: torch.device,
+    replay: UniformReplay,
+    logger: Any,
+    argument_data: bool,
+    batch_size: int,
+    disable_resign_ratio: float,
+    init_resign_threshold: float,
+    target_fp_rate: float,
+    reset_fp_interval: int,
+    no_resign_games: int,
+    min_games: int,
+    games_per_ckpt: int,
+    num_actors: int,
+    ckpt_interval: int,
+    log_interval: int,
+    save_replay_interval: int,
+    max_training_steps: int,
+    ckpt_dir: str,
+    logs_dir: str,
+    load_ckpt: str,
+    load_replay: str,
+    data_queue: mp.SimpleQueue,
+    var_ckpt: mp.Value,
+    var_resign_threshold: mp.Value,
+    ckpt_event: mp.Event,
+    stop_event: mp.Event,
+    lock=threading.Lock(),
 ) -> None:
     """Update the neural network, dynamically adjust resignation threshold if required."""
     assert min_games >= 100
@@ -440,8 +453,7 @@ def run_learner_loop(  # noqa: C901
         logger.warning(f'Training sample ratio {training_sample_ratio:.2f} might be too high')
 
     if save_replay_interval > 0:
-        logger.warning(
-            f'Saving replay state has been enabled, ensure you have at least 100GB of free space at "{ckpt_dir}"')
+        logger.warning(f'Saving replay state has been enabled, ensure you have at least 100GB of free space at "{ckpt_dir}"')
 
     if init_resign_threshold <= -1:
         with lock:
@@ -515,10 +527,10 @@ def run_learner_loop(  # noqa: C901
             # Adjust resignation threshold
             if init_resign_threshold > -1.0 and replay.num_games_added >= no_resign_games:
                 if (
-                        'is_resign_disabled' in stats
-                        and 'is_marked_for_resign' in stats
-                        and stats['is_resign_disabled']
-                        and stats['is_marked_for_resign']
+                    'is_resign_disabled' in stats
+                    and 'is_marked_for_resign' in stats
+                    and stats['is_resign_disabled']
+                    and stats['is_marked_for_resign']
                 ):
                     resign_count += 1
                     if 'is_could_won' in stats and stats['is_could_won']:
@@ -533,8 +545,8 @@ def run_learner_loop(  # noqa: C901
                         var_resign_threshold.value = init_resign_threshold
                 # For those resignation have been disabled games, the agent may not chose to resign depending on the search results
                 elif (
-                        resign_count > last_resign_count
-                        and resign_count % int(games_per_ckpt * 0.5 * disable_resign_ratio * 0.5) == 0
+                    resign_count > last_resign_count
+                    and resign_count % int(games_per_ckpt * 0.5 * disable_resign_ratio * 0.5) == 0
                 ):
                     last_resign_count = resign_count
 
@@ -551,7 +563,7 @@ def run_learner_loop(  # noqa: C901
 
             # Perform network parameters update
             if replay.num_games_added == min_games or (
-                    replay.num_games_added >= min_games and last_ckpt_games >= games_per_ckpt
+                replay.num_games_added >= min_games and last_ckpt_games >= games_per_ckpt
             ):
                 logger.debug(
                     f'Collected {last_ckpt_games} games, {last_ckpt_samples} samples from last checkpoint (training steps {training_steps})'
@@ -674,22 +686,22 @@ def maybe_adjust_resign_threshold(current_v, current_rate, target_rate, min_v=-0
 
 @torch.no_grad()
 def run_evaluator_loop(
-        seed: int,
-        network: torch.nn.Module,
-        device: torch.device,
-        env: BoardGameEnv,
-        eval_games_dir: str,
-        num_simulations: int,
-        num_parallel: int,
-        c_puct_base: float,
-        c_puct_init: float,
-        default_rating: float,
-        logs_dir: str,
-        save_sgf_dir: str,
-        load_ckpt: str,
-        log_level: str,
-        var_ckpt: mp.Value,
-        stop_event: mp.Event,
+    seed: int,
+    network: torch.nn.Module,
+    device: torch.device,
+    env: BoardGameEnv,
+    eval_games_dir: str,
+    num_simulations: int,
+    num_parallel: int,
+    c_puct_base: float,
+    c_puct_init: float,
+    default_rating: float,
+    logs_dir: str,
+    save_sgf_dir: str,
+    load_ckpt: str,
+    log_level: str,
+    var_ckpt: mp.Value,
+    stop_event: mp.Event,
 ) -> None:
     """Evaluate the latest neural network by paying against network from last checkpoint.
     Also compute the prediction accuracy on human games if applicable.
@@ -810,13 +822,13 @@ def run_evaluator_loop(
 
 @torch.no_grad()
 def eval_against_prev_ckpt(
-        env,
-        black_player,
-        white_player,
-        black_elo,
-        white_elo,
-        c_puct_base,
-        c_puct_init,
+    env,
+    black_player,
+    white_player,
+    black_elo,
+    white_elo,
+    c_puct_base,
+    c_puct_init,
 ) -> Mapping[Text, Any]:
     _ = env.reset()
     mcts_player = None
@@ -866,10 +878,10 @@ def eval_against_prev_ckpt(
 
 @torch.no_grad()
 def eval_on_pro_games(
-        network,
-        device,
-        dataloader,
-        k_list=(1, 3, 5),
+    network,
+    device,
+    dataloader,
+    k_list=(1, 3, 5),
 ) -> Mapping[Text, Any]:
     assert min(k_list) >= 1
 

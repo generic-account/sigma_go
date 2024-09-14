@@ -45,7 +45,8 @@ flags.DEFINE_integer(
     'Number of leaves to collect before using the neural network to evaluate the positions during MCTS search, 1 means no parallel search.',
 )
 
-flags.DEFINE_integer('minimax_depth', 2, 'Depth of minimax search')
+flags.DEFINE_integer('minimax_depth', 1, 'Depth of minimax search')
+flags.DEFINE_integer('k_best', 20, 'The number of best actions to consider in minimax search.')
 
 
 flags.DEFINE_float('c_puct_base', 19652, 'Exploration constants balancing priors vs. search values.')
@@ -111,9 +112,10 @@ def main():
             num_simulations=FLAGS.num_simulations,
             num_parallel=FLAGS.num_parallel,
             minimax_depth=FLAGS.minimax_depth,
+            k_best=FLAGS.k_best,
             root_noise=False,
             deterministic=True,
-            use_minimax=True
+            use_minimax=True,
         )
 
     # Wrap MCTS player for the GUI program

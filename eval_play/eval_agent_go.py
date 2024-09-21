@@ -38,16 +38,15 @@ flags.DEFINE_string(
     'Load the checkpoint file for white player.',
 )
 
-flags.DEFINE_integer('num_simulations', 100, 'Number of iterations per MCTS search.')
+flags.DEFINE_integer('num_simulations', 90, 'Number of iterations per MCTS search.')
 flags.DEFINE_integer(
     'num_parallel',
     8,
     'Number of leaves to collect before using the neural network to evaluate the positions during MCTS search, 1 means no parallel search.',
 )
 
-flags.DEFINE_integer('max_depth', 5, 'Depth of minimax search')
+flags.DEFINE_integer('depth', 1, 'Depth of minimax search')
 flags.DEFINE_integer('k_best', 3, 'The number of best actions to consider in minimax search.')
-flags.DEFINE_float('time_limit', 100, 'Time limit for Hybrid search in seconds.')
 
 
 flags.DEFINE_float('c_puct_base', 19652, 'Exploration constants balancing priors vs. search values.')
@@ -113,11 +112,10 @@ def main():
             num_simulations=FLAGS.num_simulations,
             num_parallel=FLAGS.num_parallel,
             k_best=FLAGS.k_best,
-            max_depth=FLAGS.max_depth,
+            depth=FLAGS.depth,
             root_noise=False,
             deterministic=True,
             use_minimax=True,
-            time_limit=FLAGS.time_limit,
         )
 
     # Wrap MCTS player for the GUI program

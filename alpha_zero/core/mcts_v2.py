@@ -169,25 +169,37 @@ class TranspositionTable:
         return self.table.get(zobrist_hash)
 
 
-def depth_limited_minimax(
+def minimax(
     env: BoardGameEnv,
-    eval_func: Callable[[np.ndarray], Tuple[Iterable[np.ndarray], Iterable[float]]],
+    eval_func: Callable[[np.ndarray, bool], Tuple[Iterable[np.ndarray], Iterable[float]]],
     depth: int,
     k_best: int = None,
+    transposition_table: TranspositionTable = None,
     alpha: float = -float('inf'),
     beta: float = float('inf'),
-    maximizing_player: bool = True,
-    transposition_table: TranspositionTable = None,
-    start_time: float = None,       # Start time for time constraint
-    time_limit: float = None,       # Time limit in seconds
 ) -> float:
-    if start_time is None:
-        start_time = time.perf_counter()
+    """
+    Minimax Search with Move Ordering, K-Best Selection, Alpha-Beta Pruning, and Transposition Tables.
 
-    # Check for timeout at the beginning
-    if time_limit is not None and (time.perf_counter() - start_time) >= time_limit:
-        raise TimeoutError("Time limit exceeded during minimax search.")
+    This function performs a depth-limited minimax search with alpha-beta pruning.
+    It incorporates move ordering based on evaluation scores, selects the top K best moves
+    for exploration, and utilizes a transposition table to cache and retrieve previously
+    computed states for enhanced efficiency.
 
+    Args:
+        env: A BoardGameEnv environment.
+        eval_func: An evaluation function that returns action probabilities and predicted values
+                   from the current player's perspective.
+        depth: The depth to which the minimax search will be performed.
+        k_best: (Optional) The number of best moves to consider at each depth for move ordering.
+        transposition_table: (Optional) An existing transposition table to store and retrieve state values.
+
+    Returns:
+        The best evaluation value found within the given depth constraints.
+
+    Raises:
+        TimeoutError: If the time limit is exceeded during the search.
+    """
     if transposition_table is None:
         transposition_table = TranspositionTable()
 
@@ -203,7 +215,6 @@ def depth_limited_minimax(
                 alpha = max(alpha, stored_value)
             elif stored_flag == NodeType.UPPERBOUND:
                 beta = min(beta, stored_value)
-
             if alpha >= beta:
                 return stored_value
 
@@ -216,7 +227,7 @@ def depth_limited_minimax(
 
     legal_actions = np.where(env.legal_actions == 1)[0]
 
-    # Move ordering
+    # Move ordering based on evaluation scores
     move_scores = []
     for action in legal_actions:
         sim_env = copy.deepcopy(env)
@@ -225,45 +236,32 @@ def depth_limited_minimax(
         _, value = eval_func(obs, False)
         move_scores.append((action, value))
 
-    # Sort moves by value
-    if maximizing_player:
-        move_scores.sort(key=lambda x: x[1], reverse=True)
-    else:
-        move_scores.sort(key=lambda x: x[1])
+    # Sort moves by value (descending for maximizing player, ascending for minimizing)
+    maximizing_player = env.to_play
+    move_scores.sort(key=lambda x: x[1], reverse=maximizing_player)
 
     if k_best is not None:
         move_scores = move_scores[:k_best]
 
-    best_value = -float('inf') if maximizing_player else float('inf')
-    for action, _ in move_scores:
-        # Check for timeout before each recursive call
-        if time_limit is not None and (time.perf_counter() - start_time) >= time_limit:
-            raise TimeoutError("Time limit exceeded during minimax search.")
+    best_value = alpha if maximizing_player else beta
 
+    for action, _ in move_scores:
         sim_env = copy.deepcopy(env)
         sim_env.step(action)
-        try:
-            eval = depth_limited_minimax(
-                sim_env,
-                eval_func,
-                depth - 1,
-                k_best,
-                alpha,
-                beta,
-                not maximizing_player,
-                transposition_table,
-                start_time,
-                time_limit
-            )
-        except TimeoutError:
-            raise  # Propagate the timeout exception
+        child_value = minimax(
+            sim_env,
+            eval_func,
+            depth - 1,
+            k_best,
+            transposition_table
+        )
 
         if maximizing_player:
-            best_value = max(best_value, eval)
-            alpha = max(alpha, eval)
+            best_value = max(best_value, child_value)
+            alpha = max(alpha, best_value)
         else:
-            best_value = min(best_value, eval)
-            beta = min(beta, eval)
+            best_value = min(best_value, child_value)
+            beta = min(beta, best_value)
 
         if beta <= alpha:
             break
@@ -277,48 +275,6 @@ def depth_limited_minimax(
         flag = NodeType.EXACT
 
     transposition_table.store(zobrist_hash, depth, best_value, flag)
-    return best_value
-
-def iterative_deepening_minimax(
-    env: BoardGameEnv,
-    eval_func: Callable[[np.ndarray], Tuple[Iterable[np.ndarray], Iterable[float]]],
-    max_depth: int,
-    k_best: int,
-    transposition_table: TranspositionTable,
-    time_limit: float,  # Time limit in seconds
-) -> float:
-    start_time = time.perf_counter()
-    best_value = 0
-
-    for depth in range(1, max_depth + 1):
-        elapsed_time = time.perf_counter() - start_time
-
-        if elapsed_time >= time_limit:
-            logger.info(f"Time limit reached at depth {depth - 1}.")
-            break
-
-        remaining_time = time_limit - elapsed_time
-        logger.info(f"Starting minimax search at depth {depth} with {remaining_time:.2f} seconds remaining.")
-
-        try:
-            value = depth_limited_minimax(
-                env,
-                eval_func,
-                depth,
-                k_best,
-                -float('inf'),
-                float('inf'),
-                True,
-                transposition_table,
-                start_time,
-                remaining_time
-            )
-            best_value = value
-            logger.info(f"Completed depth {depth} with value {value}.")
-        except TimeoutError:
-            logger.warning(f"Minimax search at depth {depth} timed out.")
-            break
-
     return best_value
         
 
@@ -495,13 +451,12 @@ def uct_search(
     c_puct_base: float,
     c_puct_init: float,
     k_best: int,
-    max_depth: int,
+    depth: int,
     num_simulations: int = 800,
     root_noise: bool = False,
     warm_up: bool = False,
     deterministic: bool = False,
     use_minimax: bool = False,
-    time_limit: float = None,
 ) -> Tuple[int, np.ndarray, float, float, Node]:
     """Single-threaded Upper Confidence Bound (UCB) for Trees (UCT) search without any rollout.
 
@@ -575,13 +530,6 @@ def uct_search(
     transposition_table = TranspositionTable()
 
     while root_node.N < num_simulations:
-        current_time = time.perf_counter()
-
-        # If time limit is provided, check if we have enough time to run the search
-        if time_limit is not None and (current_time - start_time) > time_limit:
-            logger.info(f"Time limit reached, stopping MCTS simulations")
-            break
-
         node = root_node
 
         # Make sure do not touch the actual environment.
@@ -612,16 +560,12 @@ def uct_search(
 
         # Phase 2 - Expand and evaluation
         if use_minimax:
-            # Calculate remaining time
-            elapsed_time = time.perf_counter() - start_time
-            remaining_time = time_limit - elapsed_time if time_limit else None
-            minimax_value = iterative_deepening_minimax(
+            minimax_value = minimax(
                 sim_env, 
                 eval_func, 
-                max_depth, 
+                depth, 
                 k_best, 
-                remaining_time,
-                transposition_table
+                transposition_table,
             )
 
             prior_prob, mcts_value = eval_func(obs, False)
@@ -706,12 +650,11 @@ def parallel_uct_search(
     num_simulations: int,
     num_parallel: int,
     k_best: int,
-    max_depth: int,
+    depth: int,
     root_noise: bool = False,
     warm_up: bool = False,
     deterministic: bool = False,
     use_minimax: bool = False,
-    time_limit: float = None,
 ) -> Tuple[int, np.ndarray, float, float, Node]:
     """Single-threaded Upper Confidence Bound (UCB) for Trees (UCT) search without any rollout.
 
@@ -791,13 +734,6 @@ def parallel_uct_search(
         failsafe = 0
 
         while len(leaves) < num_parallel and failsafe < num_parallel * 2:
-            # Initialize current time
-            current_time = time.perf_counter()
-
-            # Check if time limit is reached
-            if time_limit and (current_time - start_time) > time_limit:
-                logger.info(f"Time limit reached, stopping MCTS simulations")
-                break
 
             # This is necessary as when a game is over no leaf is added to leaves,
             # as we use the actual game results to update statistic
@@ -837,19 +773,14 @@ def parallel_uct_search(
             prior_probs, values = eval_func(np.stack(batched_obs, axis=0), True)
 
             if use_minimax:
-                # Calculate remaining time
-                elapsed_time = time.perf_counter() - start_time
-                remaining_time = time_limit - elapsed_time if time_limit else None
-
                 # print(f"Leaf depth: {leaf.depth}, Minimax depth: {minimax_depth}")
                 minimax_values = [
-                    iterative_deepening_minimax(
+                    minimax(
                         sim_env, 
                         eval_func, 
-                        max_depth, 
+                        depth, 
                         k_best,  
                         transposition_table,
-                        remaining_time,
                     ) for _ in batched_nodes
                 ]
                 # print(f"Minimax value: {value}")
@@ -897,7 +828,7 @@ def parallel_uct_search(
 
     # Calculate time taken for search
     end_time = time.perf_counter()
-    print(f"Time taken for search: {end_time - start_time}")
+    logger.info(f"Time taken for search: {end_time - start_time}")
 
     return move, search_pi, root_node.Q, best_child_Q, next_root_node
 

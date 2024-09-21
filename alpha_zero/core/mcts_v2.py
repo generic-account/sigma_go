@@ -55,6 +55,13 @@ from enum import Enum
 
 from alpha_zero.envs.base import BoardGameEnv
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,  # Change to logging.DEBUG for more detailed output
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 class DummyNode(object):
     """A placeholder to make computation possible for the root node."""

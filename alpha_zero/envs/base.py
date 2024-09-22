@@ -45,6 +45,7 @@ class BoardGameEnv(gym.Env):
             white_player_id: id and the stone color for white player, default 2.
             has_pass_move: the game has pass move, default off.
             id: environment id or name.
+            zobrist_seed: seed for zobrist hashing, default 42.
         """
         assert black_player_id != white_player_id != 0, 'player ids can not be the same, and can not be zero'
 

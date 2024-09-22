@@ -63,6 +63,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+class NodeType(Enum):
+    """
+    Enumeration for the type of node in the transposition table.
+    """
+    EXACT = 0
+    LOWERBOUND = 1
+    UPPERBOUND = 2
+
 class DummyNode(object):
     """A placeholder to make computation possible for the root node."""
 
@@ -70,12 +78,6 @@ class DummyNode(object):
         self.parent = None
         self.child_W = collections.defaultdict(float)
         self.child_N = collections.defaultdict(float)
-
-
-class NodeType(Enum):
-    EXACT = 0
-    LOWERBOUND = 1
-    UPPERBOUND = 2
 
 class Node:
     """Node in the MCTS search tree."""
@@ -95,6 +97,7 @@ class Node:
             prior: a prior probability of the node for a specific action, could be empty in case of root node.
             move: the action associated with the prior probability.
             parent: the parent node, could be a `DummyNode` if this is the root node.
+            depth: the depth of the node in the MCTS tree.
         """
 
         self.to_play = to_play
@@ -132,6 +135,7 @@ class Node:
 
     @N.setter
     def N(self, value):
+        """The total number of visits for current node at parent's level."""
         self.parent.child_N[self.move] = value
 
     @property
@@ -141,6 +145,7 @@ class Node:
 
     @W.setter
     def W(self, value):
+        """The total value for current node is stored at parent's level."""
         self.parent.child_W[self.move] = value
 
     @property
@@ -153,19 +158,48 @@ class Node:
 
     @property
     def has_parent(self) -> bool:
+        """Check if the node has a parent."""
         return isinstance(self.parent, Node)
 
 class TranspositionTable:
+    """
+    Transposition Table for storing and retrieving previously computed states.
+    """
     def __init__(self, size=1000000):
+        """
+        Initialize the transposition table with a given size.
+
+        Args:
+            size: The maximum number of entries the table can hold.
+        """
         self.table = {}
         self.size = size
 
     def store(self, zobrist_hash, depth, value, flag):
+        """
+        Store a new entry in the transposition table.
+
+        Args:
+            zobrist_hash: The hash of the current board state.
+            depth: The depth at which this state was evaluated.
+            value: The evaluation value of the current state.
+            flag: The type of node (EXACT, LOWERBOUND, UPPERBOUND).
+        """
         if len(self.table) >= self.size:
             self.table.pop(next(iter(self.table)))
         self.table[zobrist_hash] = (depth, value, flag)
     
     def lookup(self, zobrist_hash):
+        """
+        Retrieve an entry from the transposition table if it exists.
+
+        Args:
+            zobrist_hash: The hash of the current board state.
+
+        Returns:
+            A tuple containing the depth, value, and flag of the state if found,
+            otherwise None.
+        """
         return self.table.get(zobrist_hash)
 
 
@@ -173,32 +207,26 @@ def minimax(
     env: BoardGameEnv,
     eval_func: Callable[[np.ndarray, bool], Tuple[Iterable[np.ndarray], Iterable[float]]],
     depth: int,
-    k_best: int = None,
-    transposition_table: TranspositionTable = None,
     alpha: float = -float('inf'),
     beta: float = float('inf'),
+    k_best: int = None,
+    transposition_table: TranspositionTable = None,
 ) -> float:
     """
-    Minimax Search with Move Ordering, K-Best Selection, Alpha-Beta Pruning, and Transposition Tables.
-
-    This function performs a depth-limited minimax search with alpha-beta pruning.
-    It incorporates move ordering based on evaluation scores, selects the top K best moves
-    for exploration, and utilizes a transposition table to cache and retrieve previously
-    computed states for enhanced efficiency.
+    Perfroms a depth-limited minimax search with alpha-beta pruning, move ordering, and transposition tables.
 
     Args:
-        env: A BoardGameEnv environment.
-        eval_func: An evaluation function that returns action probabilities and predicted values
-                   from the current player's perspective.
-        depth: The depth to which the minimax search will be performed.
-        k_best: (Optional) The number of best moves to consider at each depth for move ordering.
-        transposition_table: (Optional) An existing transposition table to store and retrieve state values.
+        env: The game environment.
+        eval_func: Evaluation function that returns action probabilities and predicted values.
+        depth: The maximum depth to search.
+        k_best: Number of best moves to consider at each depth.
+        transposition_table: Table to store and retrieve previously computed states.
+        alpha: The alpha value for alpha-beta pruning.
+        beta: The beta value for alpha-beta pruning.
 
     Returns:
         The best evaluation value found within the given depth constraints.
 
-    Raises:
-        TimeoutError: If the time limit is exceeded during the search.
     """
     if transposition_table is None:
         transposition_table = TranspositionTable()
@@ -354,7 +382,8 @@ def backup(node: Node, mcts_value: float, minimax_value: float) -> None:
 
     Args:
         node: current leaf node in the search tree.
-        value: the evaluation value evaluated from current player's perspective.
+        mcts_value: the evaluation value evaluated from 'the mcts algorithm of the current player's perspective.
+        minimax_value: the evaluation value evaluated from minimax algorithm of the current player's perspective.
 
     Raises:
         ValueError:
@@ -481,11 +510,14 @@ def uct_search(
         root_node: root node of the search tree, this comes from reuse sub-tree.
         c_puct_base: a float constant determining the level of exploration.
         c_puct_init: a float constant determining the level of exploration.
+        k_best: number of best moves to consider at each depth.
+        depth: depth limit for minimax search.
         num_simulations: number of simulations to run, default 800.
         root_noise: whether add dirichlet noise to root node to encourage exploration, default off.
         warm_up: if true, use temperature 1.0 to generate play policy, other wise use 0.1, default off.
         deterministic: after the MCTS search, choose the child node with most visits number to play in the game,
             instead of sample through a probability distribution, default off.
+        use_minimax: whether use minimax algorithm to evaluate the leaf node, default off.
 
     Returns:
         tuple contains:
@@ -681,6 +713,8 @@ def parallel_uct_search(
         root_node: root node of the search tree, this comes from reuse sub-tree.
         c_puct_base: a float constant determining the level of exploration.
         c_puct_init: a float constant determining the level of exploration.
+        k_best: number of best moves to consider at each depth.
+        depth: depth limit for minimax search.
         num_simulations: number of simulations to run.
         num_parallel: Number of parallel leaves for MCTS search. This is also the batch size for neural network evaluation.
         root_noise: whether add dirichlet noise to root node to encourage exploration,
@@ -688,6 +722,7 @@ def parallel_uct_search(
         warm_up: if true, use temperature 1.0 to generate play policy, other wise use 0.1, default off.
         deterministic: after the MCTS search, choose the child node with most visits number to play in the game,
             instead of sample through a probability distribution, default off.
+        use_minimax: whether use minimax algorithm to evaluate the leaf node, default off.
 
 
     Returns:

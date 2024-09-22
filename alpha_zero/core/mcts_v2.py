@@ -207,10 +207,10 @@ def minimax(
     env: BoardGameEnv,
     eval_func: Callable[[np.ndarray, bool], Tuple[Iterable[np.ndarray], Iterable[float]]],
     depth: int,
-    alpha: float = -float('inf'),
-    beta: float = float('inf'),
     k_best: int = None,
     transposition_table: TranspositionTable = None,
+    alpha: float = -float('inf'),
+    beta: float = float('inf'),
 ) -> float:
     """
     Perfroms a depth-limited minimax search with alpha-beta pruning, move ordering, and transposition tables.

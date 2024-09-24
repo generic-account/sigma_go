@@ -35,6 +35,7 @@ class BoardGameEnv(gym.Env):
         has_pass_move: bool = False,
         has_resign_move: bool = False,
         id: str = '',
+        zobrist_seed: int = 42, # Seed for zobrist hashing
     ) -> None:
         """
         Args:
@@ -44,6 +45,7 @@ class BoardGameEnv(gym.Env):
             white_player_id: id and the stone color for white player, default 2.
             has_pass_move: the game has pass move, default off.
             id: environment id or name.
+            zobrist_seed: seed for zobrist hashing, default 42.
         """
         assert black_player_id != white_player_id != 0, 'player ids can not be the same, and can not be zero'
 
@@ -90,6 +92,50 @@ class BoardGameEnv(gym.Env):
         self.gtp_rows = [str(i) for i in range(self.board_size, -1, -1)]
 
         self.cc = CoordsConvertor(self.board_size)
+        self.zobrist_seed = zobrist_seed
+        self._initialize_zobrist()
+
+    def _initialize_zobrist(self):
+        """Initialize the Zobrist hashing tables."""
+        rng = np.random.default_rng(self.zobrist_seed)
+        # Three states: empty, black, white
+        self.zobrist_table = rng.integers(
+            low=0,
+            high=2**64,
+            size=(self.board_size, self.board_size, 3),
+            dtype=np.uint64,
+        )
+
+        # Player to play
+        self.zobrist_player = rng.integers(
+            low=0,
+            high=np.iinfo(np.uint64).max,
+            size=2, # 1 for black, -1 for white
+            dtype=np.uint64,
+        )
+        
+    def compute_zobrist_hash(self) -> int:
+        """Compute the Zobrist hash for the current board state."""
+        hash_value = np.uint64(0)
+        for row in range(self.board_size):
+            for col in range(self.board_size):
+                piece = self.board[row, col]
+                if piece == self.black_player:
+                    hash_value ^= self.zobrist_table[row, col, 1]
+                elif piece == self.white_player:
+                    hash_value ^= self.zobrist_table[row, col, 2]
+                else:
+                    hash_value ^= self.zobrist_table[row, col, 0]
+        # XOR with player to play
+        if self.to_play == self.black_player:
+            hash_value ^= self.zobrist_player[1]
+        else:
+            hash_value ^= self.zobrist_player[-1]
+        return int(hash_value)
+
+    def zobrist_hash(self) -> int:
+        """Return the current Zobrist hash."""
+        return self.current_hash
 
     def reset(self, **kwargs) -> np.ndarray:
         """Reset game to initial state."""
@@ -108,6 +154,9 @@ class BoardGameEnv(gym.Env):
         self.board_deltas = self.get_empty_queue()
 
         del self.history[:]
+
+        # Reset Zobrist hash
+        self.current_hash = self.compute_zobrist_hash()
 
         return self.observation()
 
@@ -198,6 +247,12 @@ class BoardGameEnv(gym.Env):
 
         self.add_to_history(self.last_player, self.last_move)
 
+        # Update Zobrist hash: remove previous player to play
+        if self.to_play == self.black_player:
+            self.current_hash ^= self.zobrist_table[row_index, col_index, 0]
+        else:
+            self.current_hash ^= self.zobrist_table[row_index, col_index, 1]
+
         # Handle actual game logic
         # Make sure the action is illegal from now on.
         self.legal_actions[action] = 0
@@ -206,11 +261,21 @@ class BoardGameEnv(gym.Env):
         row_index, col_index = self.action_to_coords(action)
         self.board[row_index, col_index] = self.to_play
 
+        # Update Zobrist hash: add current player to play
+        if self.to_play == self.black_player:
+            self.current_hash ^= self.zobrist_table[row_index, col_index, 1]
+        else:
+            self.current_hash ^= self.zobrist_table[row_index, col_index, 2]
+
         # Make sure the latest board position is always at index 0
         self.board_deltas.appendleft(np.copy(self.board))
 
         # Switch next player
         self.to_play = self.opponent_player
+        if self.to_play == self.black_player:
+            self.current_hash ^= self.zobrist_player[1]
+        else:
+            self.current_hash ^= self.zobrist_player[-1]
 
         return self.observation(), 0, False, {}
 

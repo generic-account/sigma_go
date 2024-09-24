@@ -393,7 +393,7 @@ def backup(node: Node, mcts_value: float, minimax_value: float) -> None:
     if not isinstance(mcts_value, float) or not isinstance(minimax_value, float):
         raise ValueError("Both mcts_value and minimax_value must be floats.")
 
-    max_use_minimax_depth = 20
+    max_use_minimax_depth = 50
 
     # Calculate weight based on node depth
     weight = max(0.0, min(1.0, node.depth / max_use_minimax_depth))
@@ -819,9 +819,20 @@ def parallel_uct_search(
                     ) for _ in batched_nodes
                 ]
                 # print(f"Minimax value: {value}")
+                for leaf, prior_prob, value, minimax_value in zip(batched_nodes, prior_probs, values, minimax_values):
+                    revert_virtual_loss(leaf)
 
-            for leaf, prior_prob, value, minimax_value in zip(batched_nodes, prior_probs, values, minimax_values):
-                revert_virtual_loss(leaf)
+                    # If a node was picked multiple times (despite virtual losses), we shouldn't
+                    # expand it more than once.
+                    if leaf.is_expanded:
+                        continue
+
+                    expand(leaf, prior_prob)
+                    backup(leaf, value, minimax_value)
+
+            else:
+                for leaf, prior_prob, value in zip(batched_nodes, prior_probs, values):
+                    revert_virtual_loss(leaf)
 
                 # If a node was picked multiple times (despite virtual losses), we shouldn't
                 # expand it more than once.
@@ -829,7 +840,7 @@ def parallel_uct_search(
                     continue
 
                 expand(leaf, prior_prob)
-                backup(leaf, value, minimax_value) # Backup with both MCTS and Minimax values
+                backup(leaf, value, value) # Backup with both MCTS values
 
     # Play - generate search policy action probability from the root node's child visit number.
     search_pi = generate_search_policy(root_node.child_N, 1.0 if warm_up else 0.1, root_legal_actions)

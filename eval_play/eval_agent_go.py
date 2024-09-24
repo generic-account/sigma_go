@@ -45,7 +45,7 @@ flags.DEFINE_integer(
     'Number of leaves to collect before using the neural network to evaluate the positions during MCTS search, 1 means no parallel search.',
 )
 
-flags.DEFINE_integer('depth', 1, 'Depth of minimax search')
+flags.DEFINE_integer('depth', 2, 'Depth of minimax search')
 flags.DEFINE_integer('k_best', 3, 'The number of best actions to consider in minimax search.')
 
 

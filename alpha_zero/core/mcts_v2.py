@@ -47,11 +47,29 @@ import copy
 import collections
 import math
 import time
-from typing import Callable, Tuple, Mapping, Iterable, Any
 import numpy as np
+import logging
+from typing import Callable, Tuple, Mapping, Iterable, Any
+from enum import Enum
+
 
 from alpha_zero.envs.base import BoardGameEnv
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,  # Change to logging.DEBUG for more detailed output
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+class NodeType(Enum):
+    """
+    Enumeration for the type of node in the transposition table.
+    """
+    EXACT = 0
+    LOWERBOUND = 1
+    UPPERBOUND = 2
 
 class DummyNode(object):
     """A placeholder to make computation possible for the root node."""
@@ -60,7 +78,6 @@ class DummyNode(object):
         self.parent = None
         self.child_W = collections.defaultdict(float)
         self.child_N = collections.defaultdict(float)
-
 
 class Node:
     """Node in the MCTS search tree."""
@@ -80,6 +97,7 @@ class Node:
             prior: a prior probability of the node for a specific action, could be empty in case of root node.
             move: the action associated with the prior probability.
             parent: the parent node, could be a `DummyNode` if this is the root node.
+            depth: the depth of the node in the MCTS tree.
         """
 
         self.to_play = to_play
@@ -117,6 +135,7 @@ class Node:
 
     @N.setter
     def N(self, value):
+        """The total number of visits for current node at parent's level."""
         self.parent.child_N[self.move] = value
 
     @property
@@ -126,6 +145,7 @@ class Node:
 
     @W.setter
     def W(self, value):
+        """The total value for current node is stored at parent's level."""
         self.parent.child_W[self.move] = value
 
     @property
@@ -138,27 +158,104 @@ class Node:
 
     @property
     def has_parent(self) -> bool:
+        """Check if the node has a parent."""
         return isinstance(self.parent, Node)
 
+class TranspositionTable:
+    """
+    Transposition Table for storing and retrieving previously computed states.
+    """
+    def __init__(self, size=1000000):
+        """
+        Initialize the transposition table with a given size.
 
-def depth_limited_minimax(
+        Args:
+            size: The maximum number of entries the table can hold.
+        """
+        self.table = {}
+        self.size = size
+
+    def store(self, zobrist_hash, depth, value, flag):
+        """
+        Store a new entry in the transposition table.
+
+        Args:
+            zobrist_hash: The hash of the current board state.
+            depth: The depth at which this state was evaluated.
+            value: The evaluation value of the current state.
+            flag: The type of node (EXACT, LOWERBOUND, UPPERBOUND).
+        """
+        if len(self.table) >= self.size:
+            self.table.pop(next(iter(self.table)))
+        self.table[zobrist_hash] = (depth, value, flag)
+    
+    def lookup(self, zobrist_hash):
+        """
+        Retrieve an entry from the transposition table if it exists.
+
+        Args:
+            zobrist_hash: The hash of the current board state.
+
+        Returns:
+            A tuple containing the depth, value, and flag of the state if found,
+            otherwise None.
+        """
+        return self.table.get(zobrist_hash)
+
+
+def minimax(
     env: BoardGameEnv,
-    eval_func: Callable[[np.ndarray], Tuple[Iterable[np.ndarray], Iterable[float]]],
+    eval_func: Callable[[np.ndarray, bool], Tuple[Iterable[np.ndarray], Iterable[float]]],
     depth: int,
     k_best: int = None,
+    transposition_table: TranspositionTable = None,
     alpha: float = -float('inf'),
     beta: float = float('inf'),
-    maximizing_player: bool = True,
 ) -> float:
+    """
+    Perfroms a depth-limited minimax search with alpha-beta pruning, move ordering, and transposition tables.
+
+    Args:
+        env: The game environment.
+        eval_func: Evaluation function that returns action probabilities and predicted values.
+        depth: The maximum depth to search.
+        k_best: Number of best moves to consider at each depth.
+        transposition_table: Table to store and retrieve previously computed states.
+        alpha: The alpha value for alpha-beta pruning.
+        beta: The beta value for alpha-beta pruning.
+
+    Returns:
+        The best evaluation value found within the given depth constraints.
+
+    """
+    if transposition_table is None:
+        transposition_table = TranspositionTable()
+
+    zobrist_hash = env.zobrist_hash()
+    tt_entry = transposition_table.lookup(zobrist_hash)
+
+    if tt_entry is not None:
+        stored_depth, stored_value, stored_flag = tt_entry
+        if stored_depth >= depth:
+            if stored_flag == NodeType.EXACT:
+                return stored_value
+            elif stored_flag == NodeType.LOWERBOUND:
+                alpha = max(alpha, stored_value)
+            elif stored_flag == NodeType.UPPERBOUND:
+                beta = min(beta, stored_value)
+            if alpha >= beta:
+                return stored_value
+
     if depth == 0 or env.is_game_over():
         obs = env.observation()
         _, value = eval_func(obs, False)
         assert isinstance(value, float), f"Expected scalar, got {type(value)}"
+        transposition_table.store(zobrist_hash, depth, value, NodeType.EXACT)
         return value
 
     legal_actions = np.where(env.legal_actions == 1)[0]
 
-    # Move ordering
+    # Move ordering based on evaluation scores
     move_scores = []
     for action in legal_actions:
         sim_env = copy.deepcopy(env)
@@ -167,41 +264,47 @@ def depth_limited_minimax(
         _, value = eval_func(obs, False)
         move_scores.append((action, value))
 
-    # Sort moves by value
-    if maximizing_player:
-        move_scores.sort(key=lambda x: x[1], reverse=True)
-    else:
-        move_scores.sort(key=lambda x: x[1])
+    # Sort moves by value (descending for maximizing player, ascending for minimizing)
+    maximizing_player = env.to_play
+    move_scores.sort(key=lambda x: x[1], reverse=maximizing_player)
 
     if k_best is not None:
         move_scores = move_scores[:k_best]
-        # print(f"Move scores: {move_scores}")
 
-    if maximizing_player:
-        max_eval = -float('inf')
-        for action, _ in move_scores:
-            sim_env = copy.deepcopy(env)
-            sim_env.step(action)
-            eval = depth_limited_minimax(sim_env, eval_func, depth - 1, k_best, alpha, beta, False)
-            max_eval = max(max_eval, eval)
-            alpha = max(alpha, eval)
-            if beta <= alpha:
-                break
+    best_value = alpha if maximizing_player else beta
 
-        return max_eval
+    for action, _ in move_scores:
+        sim_env = copy.deepcopy(env)
+        sim_env.step(action)
+        child_value = minimax(
+            sim_env,
+            eval_func,
+            depth - 1,
+            k_best,
+            transposition_table
+        )
+
+        if maximizing_player:
+            best_value = max(best_value, child_value)
+            alpha = max(alpha, best_value)
+        else:
+            best_value = min(best_value, child_value)
+            beta = min(beta, best_value)
+
+        if beta <= alpha:
+            break
+
+    # Store the result in the transposition table
+    if best_value <= alpha:
+        flag = NodeType.UPPERBOUND
+    elif best_value >= beta:
+        flag = NodeType.LOWERBOUND
     else:
-        min_eval = float('inf')
-        for action, _ in move_scores:
-            sim_env = copy.deepcopy(env)
-            sim_env.step(action)
-            eval = depth_limited_minimax(sim_env, eval_func, depth - 1, k_best, alpha, beta, True,)
-            min_eval = min(min_eval, eval)
-            beta = min(beta, eval)
-            if beta <= alpha:
-                break
+        flag = NodeType.EXACT
 
-        return min_eval
-
+    transposition_table.store(zobrist_hash, depth, best_value, flag)
+    return best_value
+        
 
 def best_child(
     node: Node,
@@ -274,26 +377,34 @@ def expand(node: Node, prior_prob: np.ndarray) -> None:
     node.is_expanded = True
 
 
-def backup(node: Node, value: float) -> None:
+def backup(node: Node, mcts_value: float, minimax_value: float) -> None:
     """Update statistics of the node and all traversed parent nodes.
 
     Args:
         node: current leaf node in the search tree.
-        value: the evaluation value evaluated from current player's perspective.
+        mcts_value: the evaluation value evaluated from 'the mcts algorithm of the current player's perspective.
+        minimax_value: the evaluation value evaluated from minimax algorithm of the current player's perspective.
 
     Raises:
         ValueError:
             if input argument `value` is not float data type.
     """
 
-    if not isinstance(value, float):
-        raise ValueError(f'Expect `value` to be a float type, got {type(value)}')
+    if not isinstance(mcts_value, float) or not isinstance(minimax_value, float):
+        raise ValueError("Both mcts_value and minimax_value must be floats.")
+
+    max_use_minimax_depth = 82
+
+    # Calculate weight based on node depth
+    weight = max(0.0, min(1.0, node.depth / max_use_minimax_depth))
+
+    combined_value = mcts_value * (1 - weight) + minimax_value * weight
 
     while isinstance(node, Node):
         node.N += 1
-        node.W += value
+        node.W += combined_value
         node = node.parent
-        value = -1 * value
+        combined_value = -1 * combined_value
 
 
 def add_dirichlet_noise(node: Node, legal_actions: np.ndarray, eps: float = 0.25, alpha: float = 0.03) -> None:
@@ -368,8 +479,8 @@ def uct_search(
     root_node: Node,
     c_puct_base: float,
     c_puct_init: float,
-    minimax_depth: int,
     k_best: int,
+    depth: int,
     num_simulations: int = 800,
     root_noise: bool = False,
     warm_up: bool = False,
@@ -399,11 +510,14 @@ def uct_search(
         root_node: root node of the search tree, this comes from reuse sub-tree.
         c_puct_base: a float constant determining the level of exploration.
         c_puct_init: a float constant determining the level of exploration.
+        k_best: number of best moves to consider at each depth.
+        depth: depth limit for minimax search.
         num_simulations: number of simulations to run, default 800.
         root_noise: whether add dirichlet noise to root node to encourage exploration, default off.
         warm_up: if true, use temperature 1.0 to generate play policy, other wise use 0.1, default off.
         deterministic: after the MCTS search, choose the child node with most visits number to play in the game,
             instead of sample through a probability distribution, default off.
+        use_minimax: whether use minimax algorithm to evaluate the leaf node, default off.
 
     Returns:
         tuple contains:
@@ -427,12 +541,15 @@ def uct_search(
     if env.is_game_over():
         raise RuntimeError('Game is over.')
 
+    # Start time of the search
+    start_time = time.perf_counter()
+
     # Create root node
     if root_node is None:
         prior_prob, value = eval_func(env.observation(), False)
         root_node = Node(to_play=env.to_play, num_actions=env.action_dim, parent=DummyNode())
         expand(root_node, prior_prob)
-        backup(root_node, value)
+        backup(root_node, value, value)
 
     assert root_node.to_play == env.to_play
 
@@ -441,6 +558,8 @@ def uct_search(
     # Add dirichlet noise to the prior probabilities to root node.
     if root_noise:
         add_dirichlet_noise(root_node, root_legal_actions)
+
+    transposition_table = TranspositionTable()
 
     while root_node.N < num_simulations:
         node = root_node
@@ -468,20 +587,26 @@ def uct_search(
         if done:
             # The reward is for the last player who made the move won/loss the game.
             assert node.to_play != sim_env.last_player
-            backup(node, -reward)
+            backup(node, -reward, -reward)
             continue
 
         # Phase 2 - Expand and evaluation
         if use_minimax:
-            minimax_value = depth_limited_minimax(sim_env, eval_func, minimax_depth, k_best)
-            value = minimax_value
-            backup(node, value)
+            minimax_value = minimax(
+                sim_env, 
+                eval_func, 
+                depth, 
+                k_best, 
+                transposition_table,
+            )
+
+            prior_prob, mcts_value = eval_func(obs, False)
+            # expand(node, prior_prob)
+            backup(node, mcts_value, minimax_value)  # Backup with both MCTS and Minimax values
         else:
             prior_prob, value = eval_func(obs, False)
             expand(node, prior_prob)
-
-            # Phase 3 - Backup statistics
-            backup(node, value)
+            backup(node, value, value)
 
     # Play - generate search policy action probability from the root node's child visit number.
     search_pi = generate_search_policy(root_node.child_N, 1.0 if warm_up else 0.1, root_legal_actions)
@@ -556,8 +681,8 @@ def parallel_uct_search(
     c_puct_init: float,
     num_simulations: int,
     num_parallel: int,
-    minimax_depth: int,
     k_best: int,
+    depth: int,
     root_noise: bool = False,
     warm_up: bool = False,
     deterministic: bool = False,
@@ -588,6 +713,8 @@ def parallel_uct_search(
         root_node: root node of the search tree, this comes from reuse sub-tree.
         c_puct_base: a float constant determining the level of exploration.
         c_puct_init: a float constant determining the level of exploration.
+        k_best: number of best moves to consider at each depth.
+        depth: depth limit for minimax search.
         num_simulations: number of simulations to run.
         num_parallel: Number of parallel leaves for MCTS search. This is also the batch size for neural network evaluation.
         root_noise: whether add dirichlet noise to root node to encourage exploration,
@@ -595,6 +722,7 @@ def parallel_uct_search(
         warm_up: if true, use temperature 1.0 to generate play policy, other wise use 0.1, default off.
         deterministic: after the MCTS search, choose the child node with most visits number to play in the game,
             instead of sample through a probability distribution, default off.
+        use_minimax: whether use minimax algorithm to evaluate the leaf node, default off.
 
 
     Returns:
@@ -619,13 +747,13 @@ def parallel_uct_search(
     if env.is_game_over():
         raise RuntimeError('Game is over.')
 
-    start_time = time.time()
+    start_time = time.perf_counter()
     # Create root node
     if root_node is None:
         prior_prob, value = eval_func(env.observation(), False)
         root_node = Node(to_play=env.to_play, num_actions=env.action_dim, parent=DummyNode())
         expand(root_node, prior_prob)
-        backup(root_node, value)
+        backup(root_node, value, value)
 
     assert root_node.to_play == env.to_play
 
@@ -635,11 +763,13 @@ def parallel_uct_search(
     if root_noise:
         add_dirichlet_noise(root_node, root_legal_actions)
 
+    transposition_table = TranspositionTable()
     while root_node.N < num_simulations + num_parallel:
         leaves = []
         failsafe = 0
 
         while len(leaves) < num_parallel and failsafe < num_parallel * 2:
+
             # This is necessary as when a game is over no leaf is added to leaves,
             # as we use the actual game results to update statistic
             failsafe += 1
@@ -668,7 +798,7 @@ def parallel_uct_search(
             if done:
                 # The reward is for the last player who made the move won/loss the game.
                 assert node.to_play != sim_env.last_player
-                backup(node, -reward)
+                backup(node, -reward, -reward)
                 continue
             else:
                 add_virtual_loss(node)
@@ -679,25 +809,38 @@ def parallel_uct_search(
 
             if use_minimax:
                 # print(f"Leaf depth: {leaf.depth}, Minimax depth: {minimax_depth}")
-                minimax_value = depth_limited_minimax(sim_env, eval_func, minimax_depth, k_best)
+                minimax_values = [
+                    minimax(
+                        sim_env, 
+                        eval_func, 
+                        depth, 
+                        k_best,  
+                        transposition_table,
+                    ) for _ in batched_nodes
+                ]
                 # print(f"Minimax value: {value}")
+                for leaf, prior_prob, value, minimax_value in zip(batched_nodes, prior_probs, values, minimax_values):
+                    revert_virtual_loss(leaf)
 
-            for leaf, prior_prob, value in zip(batched_nodes, prior_probs, values):
-                revert_virtual_loss(leaf)
+                    # If a node was picked multiple times (despite virtual losses), we shouldn't
+                    # expand it more than once.
+                    if leaf.is_expanded:
+                        continue
+
+                    expand(leaf, prior_prob)
+                    backup(leaf, value, minimax_value)
+
+            else:
+                for leaf, prior_prob, value in zip(batched_nodes, prior_probs, values):
+                    revert_virtual_loss(leaf)
 
                 # If a node was picked multiple times (despite virtual losses), we shouldn't
                 # expand it more than once.
                 if leaf.is_expanded:
                     continue
 
-                if use_minimax:
-                    m_value = minimax_value
-                    backup(leaf, m_value)
-                else:
-                    expand(leaf, prior_prob)
-
-                    # Phase 3 - Backpropagation
-                    backup(leaf, value)
+                expand(leaf, prior_prob)
+                backup(leaf, value, value) # Backup with both MCTS values
 
     # Play - generate search policy action probability from the root node's child visit number.
     search_pi = generate_search_policy(root_node.child_N, 1.0 if warm_up else 0.1, root_legal_actions)
@@ -728,7 +871,11 @@ def parallel_uct_search(
         best_child_Q = -next_root_node.Q
 
     assert root_legal_actions[move] == 1
-    end_time = time.time()
-    print(f"Time taken for search: {end_time - start_time}")
+
+    # Calculate time taken for search
+    end_time = time.perf_counter()
+    logger.info(f"Time taken for search: {end_time - start_time}")
 
     return move, search_pi, root_node.Q, best_child_Q, next_root_node
+
+    return pi_probs

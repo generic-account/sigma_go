@@ -85,8 +85,11 @@ def create_mcts_player(
     device: torch.device,
     num_simulations: int,
     num_parallel: int,
+    depth: int,
+    k_best: int,
     root_noise: bool = False,
     deterministic: bool = False,
+    use_minimax: bool = False,
 ) -> Callable[[BoardGameEnv, Node, float, float, bool], Tuple[int, np.ndarray, float, float, Node]]:
     @torch.no_grad()
     def eval_position(
@@ -141,6 +144,9 @@ def create_mcts_player(
                 root_noise=root_noise,
                 warm_up=warm_up,
                 deterministic=deterministic,
+                use_minimax=use_minimax,
+                k_best=k_best,
+                depth=depth,
             )
         else:
             return uct_search(
@@ -153,6 +159,9 @@ def create_mcts_player(
                 root_noise=root_noise,
                 warm_up=warm_up,
                 deterministic=deterministic,
+                use_minimax=use_minimax,
+                k_best=k_best,
+                depth=depth,
             )
 
     return act
@@ -174,6 +183,9 @@ def run_selfplay_actor_loop(
     num_parallel: int,
     c_puct_base: float,
     c_puct_init: float,
+    k_best: int,
+    depth: int,
+    use_minimax: bool,
     warm_up_steps: int,
     check_resign_after_steps: int,
     disable_resign_ratio: float,
@@ -220,8 +232,11 @@ def run_selfplay_actor_loop(
         device=device,
         num_simulations=num_simulations,
         num_parallel=num_parallel,
+        depth=depth,
+        k_best=k_best,
         root_noise=True,
         deterministic=False,
+        use_minimax=use_minimax,
     )
 
     while not stop_event.is_set():
@@ -292,6 +307,9 @@ def play_and_record_one_game(
     resign_disabled: bool,
     c_puct_base: float,
     c_puct_init: float,
+    k_best: int,
+    depth: int,
+    use_minimax: bool,
     warm_up_steps: int,
     check_resign_after_steps: int,
     resign_threshold: float,
@@ -684,6 +702,9 @@ def run_evaluator_loop(
     eval_games_dir: str,
     num_simulations: int,
     num_parallel: int,
+    k_best: int,
+    depth: int,
+    use_minimax: bool,
     c_puct_base: float,
     c_puct_init: float,
     default_rating: float,
@@ -743,8 +764,11 @@ def run_evaluator_loop(
         device=device,
         num_simulations=num_simulations,
         num_parallel=num_parallel,
+        k_best=k_best,
+        depth=depth,
         root_noise=False,
         deterministic=True,
+        use_minimax=use_minimax,
     )
 
     white_player = create_mcts_player(
@@ -752,8 +776,11 @@ def run_evaluator_loop(
         device=device,
         num_simulations=num_simulations,
         num_parallel=num_parallel,
+        k_best=k_best,
+        depth=depth,
         root_noise=False,
         deterministic=True,
+        use_minimax=use_minimax,
     )
 
     while not stop_event.is_set():

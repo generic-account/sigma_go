@@ -13,3 +13,7 @@ nohup.out
 # Jupyter Notebook
 .ipynb_checkpoints
 
+# venv
+.venv
+
+9x9_matches

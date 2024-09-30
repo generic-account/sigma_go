@@ -160,6 +160,8 @@ def play_one_match(
         'datetime': get_time_stamp(),
         'black': FLAGS.black_ckpt,
         'white': FLAGS.white_ckpt,
+        'depth': FLAGS.depth,
+        'k_best': FLAGS.k_best,
         'game': id,
         'game_result': env.get_result_string(),
         'game_length': env.steps,

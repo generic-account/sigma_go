@@ -43,7 +43,7 @@ flags.DEFINE_string(
     'Load the checkpoint file for white player.',
 )
 
-flags.DEFINE_integer('num_simulations_black', 100, 'Number of MCTS simulations for Black player.')
+flags.DEFINE_integer('num_simulations_black', 90, 'Number of MCTS simulations for Black player.')
 flags.DEFINE_integer('num_simulations_white', 200, 'Number of MCTS simulations for White player.')
 flags.DEFINE_integer(
     'num_parallel',
@@ -54,8 +54,8 @@ flags.DEFINE_integer(
 flags.DEFINE_float('c_puct_base', 19652, 'Exploration constants balancing priors vs. search values.')
 flags.DEFINE_float('c_puct_init', 1.25, 'Exploration constants balancing priors vs. search values.')
 
-flags.DEFINE_integer('k_best', 3, 'Number of best moves to consider for Minimax value.')
-flags.DEFINE_integer('depth', 1, 'Depth of Minimax search.')
+flags.DEFINE_integer('k_best', 5, 'Number of best moves to consider for Minimax value.')
+flags.DEFINE_integer('depth', 3, 'Depth of Minimax search.')
 flags.DEFINE_bool(
     'use_minimax_black',
     True,
@@ -67,7 +67,7 @@ flags.DEFINE_bool(
     'Whether the White player should use Minimax during MCTS search.',
 )
 
-flags.DEFINE_integer('num_games', 1, '')
+flags.DEFINE_integer('num_games', 10, '')
 
 flags.DEFINE_integer('num_processes', 16, 'Run the games using multiple child processes')
 

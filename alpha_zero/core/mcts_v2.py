@@ -393,7 +393,7 @@ def backup(node: Node, mcts_value: float, minimax_value: float) -> None:
     if not isinstance(mcts_value, float) or not isinstance(minimax_value, float):
         raise ValueError("Both mcts_value and minimax_value must be floats.")
 
-    max_use_minimax_depth = 82
+    max_use_minimax_depth = 10
 
     # Calculate weight based on node depth
     weight = max(0.0, min(1.0, node.depth / max_use_minimax_depth))

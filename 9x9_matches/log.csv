@@ -1,0 +1,2 @@
+datetime,black,white,game,game_result,game_length
+2024-09-24 02:45:20,./checkpoints/go/9x9/training_steps_160000.ckpt,./checkpoints/go/9x9/training_steps_160000.ckpt,0,B+1.5,73

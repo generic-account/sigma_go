@@ -3,44 +3,52 @@
 # LICENSE file for details.
 
 
-"""A much faster MCTS implementation for AlphaZero.
+"""A much faster MCTS-Minimax hybrid implementation for AlphaZero.
 Where we use Numpy arrays to store node statistics,
-and create child node on demand.
+and create child nodes on demand.
 
+This implementation combines MCTS with minimax search to get the best of both approaches:
+- MCTS for selective tree expansion and exploration 
+- Minimax for tactical calculation and pruning
+- Transposition table for caching positions
+- Principal variation tracking
 
-This implementation is adapted from the Minigo project developed by Google.
-https://github.com/tensorflow/minigo
+The hybrid approach works by:
+1. Using MCTS to guide the high-level search and identify promising variations
+2. Switching to minimax search at leaf nodes to calculate tactical sequences
+3. Using a transposition table to cache and reuse search results
+4. Propagating minimax values back up through the MCTS tree
 
+The positions are evaluated from the current player's perspective.
 
+For example, in a two-player zero-sum game:
 
-The positions are evaluated from the current player (or to move) perspective.
+        A           Black to move (root)
+       / \
+      B   C         White to move
+     / \
+    D   E           Black to move
 
-        A           Black to move
+When evaluating positions:
+- Node A represents Black's turn to move
+- Nodes B,C represent positions after White's moves
+- Nodes D,E represent positions after Black's moves
 
-    B       C       White to move
+The evaluation scores are always from the perspective of the player to move.
+So when selecting the best child of node A:
 
-  D   E             Black to move
+1. If B has score 0.8 and C has score 0.3 (from White's perspective)
+2. We negate these scores to get Black's perspective: -0.8 and -0.3
+3. Black should choose C since max(-0.8, -0.3) = -0.3
 
-For example, in the above two-player, zero-sum games search tree. 'A' is the root node,
-and when the game is in state corresponding to node 'A', it's black's turn to move.
-However the children nodes of 'A' are evaluated from white player's perspective.
-So if we select the best child for node 'A', without further consideration,
-we'd be actually selecting the best child for white player, which is not what we want.
-
-Let's look at an simplified example where we don't consider number of visits and total values,
-just the raw evaluation scores, if the evaluated scores (from white's perspective)
-for 'B' and 'C' are 0.8 and 0.3 respectively. Then according to these results,
-the best child of 'A' max(0.8, 0.3) is 'B', however this is done from white player's perspective.
-But node 'A' represents black's turn to move, so we need to select the best child from black player's perspective,
-which should be 'C' - the worst move for white, thus a best move for black.
-
-One way to resolve this issue is to always switching the signs of the child node's Q values when we select the best child.
-
-For example:
+This is implemented by negating child Q-values during selection:
     ucb_scores = -node.child_Q() + node.child_U()
 
-In this case, a max(-0.8, -0.3) will give us the correct results for black player when we select the best child for node 'A'.
-
+The hybrid approach combines:
+- MCTS's ability to focus search on promising variations
+- Minimax's tactical strength and pruning
+- Efficient position caching via transposition table
+- Principal variation tracking for best line analysis
 """
 
 import copy
@@ -121,7 +129,7 @@ class Node:
         pb_c = math.log((1 + self.N + c_puct_base) / c_puct_base) + c_puct_init
         return pb_c * self.child_P * (math.sqrt(self.N) / (1 + self.child_N))
 
-    def child_Q(self):
+    def child_Q(self) -> np.ndarray:
         """Returns a 1D numpy.array contains mean action value for all child."""
         # Avoid division by zero
         child_N = np.where(self.child_N > 0, self.child_N, 1)
@@ -129,27 +137,27 @@ class Node:
         return self.child_W / child_N
 
     @property
-    def N(self):
+    def N(self) -> float:
         """The number of visits for current node is stored at parent's level."""
         return self.parent.child_N[self.move]
 
     @N.setter
-    def N(self, value):
+    def N(self, value) -> None:
         """The total number of visits for current node at parent's level."""
         self.parent.child_N[self.move] = value
 
     @property
-    def W(self):
+    def W(self) -> float:
         """The total value for current node is stored at parent's level."""
         return self.parent.child_W[self.move]
 
     @W.setter
-    def W(self, value):
+    def W(self, value: float) -> None:
         """The total value for current node is stored at parent's level."""
         self.parent.child_W[self.move] = value
 
     @property
-    def Q(self):
+    def Q(self) -> float:
         """Returns the mean action value Q(s, a)."""
         if self.parent.child_N[self.move] > 0:
             return self.parent.child_W[self.move] / self.parent.child_N[self.move]
@@ -213,7 +221,7 @@ def minimax(
     beta: float = float('inf'),
 ) -> float:
     """
-    Perfroms a depth-limited minimax search with alpha-beta pruning, move ordering, and transposition tables.
+    Performs a depth-limited minimax search with alpha-beta pruning, move ordering, and transposition tables.
 
     Args:
         env: The game environment.
@@ -393,7 +401,7 @@ def backup(node: Node, mcts_value: float, minimax_value: float) -> None:
     if not isinstance(mcts_value, float) or not isinstance(minimax_value, float):
         raise ValueError("Both mcts_value and minimax_value must be floats.")
 
-    max_use_minimax_depth = 50
+    max_use_minimax_depth = 10
 
     # Calculate weight based on node depth
     weight = max(0.0, min(1.0, node.depth / max_use_minimax_depth))
@@ -601,7 +609,7 @@ def uct_search(
             )
 
             prior_prob, mcts_value = eval_func(obs, False)
-            # expand(node, prior_prob)
+            expand(node, prior_prob)
             backup(node, mcts_value, minimax_value)  # Backup with both MCTS and Minimax values
         else:
             prior_prob, value = eval_func(obs, False)

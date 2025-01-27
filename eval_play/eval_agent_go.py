@@ -38,16 +38,18 @@ flags.DEFINE_string(
     'Load the checkpoint file for white player.',
 )
 
-flags.DEFINE_integer('num_simulations', 90, 'Number of iterations per MCTS search.')
+flags.DEFINE_integer('num_simulations', 160, 'Number of iterations per MCTS search.')
 flags.DEFINE_integer(
     'num_parallel',
     8,
     'Number of leaves to collect before using the neural network to evaluate the positions during MCTS search, 1 means no parallel search.',
 )
 
-flags.DEFINE_integer('depth', 2, 'Depth of minimax search')
-flags.DEFINE_integer('k_best', 3, 'The number of best actions to consider in minimax search.')
-
+flags.DEFINE_integer('depth', 3, 'Depth of minimax search')
+flags.DEFINE_integer('k_best', 5, 'The number of best actions to consider in minimax search.')
+flags.DEFINE_integer('num_minimax_threads', 4, 'Number of threads for parallel minimax search')
+flags.DEFINE_float('minimax_time_limit', 30.0, 'Time limit in seconds for minimax search')
+flags.DEFINE_integer('max_minimax_leaves', 3, 'Maximum number of leaves to evaluate in minimax')
 
 flags.DEFINE_float('c_puct_base', 19652, 'Exploration constants balancing priors vs. search values.')
 flags.DEFINE_float('c_puct_init', 1.25, 'Exploration constants balancing priors vs. search values.')
@@ -115,7 +117,9 @@ def main():
             depth=FLAGS.depth,
             root_noise=False,
             deterministic=True,
-            use_minimax=True,
+            num_minimax_threads=FLAGS.num_minimax_threads,
+            minimax_time_limit=FLAGS.minimax_time_limit,
+            max_minimax_leaves=FLAGS.max_minimax_leaves,
         )
 
     # Wrap MCTS player for the GUI program

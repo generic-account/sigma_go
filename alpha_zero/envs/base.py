@@ -241,41 +241,27 @@ class BoardGameEnv(gym.Env):
         if action is not None and action != self.resign_move and self.legal_actions[int(action)] != 1:
             raise ValueError(f'Illegal action {action}.')
 
-        self.last_move = copy(int(action))
-        self.last_player = copy(self.to_play)
-        self.steps += 1
+        # Convert action to coordinates before hash updates
+        row_index, col_index = self.action_to_coords(action)
 
-        self.add_to_history(self.last_player, self.last_move)
-
-        # Update Zobrist hash: remove previous player to play
-        if self.to_play == self.black_player:
-            self.current_hash ^= self.zobrist_table[row_index, col_index, 0]
-        else:
-            self.current_hash ^= self.zobrist_table[row_index, col_index, 1]
+        # Update Zobrist hash for the piece placement
+        # First remove the empty cell hash
+        self.current_hash ^= self.zobrist_table[row_index, col_index, 0]
+        # Then add the new piece hash
+        piece_index = 1 if self.to_play == self.black_player else 2
+        self.current_hash ^= self.zobrist_table[row_index, col_index, piece_index]
 
         # Handle actual game logic
-        # Make sure the action is illegal from now on.
         self.legal_actions[action] = 0
-
-        # Update board state.
-        row_index, col_index = self.action_to_coords(action)
         self.board[row_index, col_index] = self.to_play
-
-        # Update Zobrist hash: add current player to play
-        if self.to_play == self.black_player:
-            self.current_hash ^= self.zobrist_table[row_index, col_index, 1]
-        else:
-            self.current_hash ^= self.zobrist_table[row_index, col_index, 2]
-
-        # Make sure the latest board position is always at index 0
         self.board_deltas.appendleft(np.copy(self.board))
+
+        # Update player to move in hash
+        self.current_hash ^= self.zobrist_player[1 if self.to_play == self.black_player else 0]
+        self.current_hash ^= self.zobrist_player[1 if self.opponent_player == self.black_player else 0]
 
         # Switch next player
         self.to_play = self.opponent_player
-        if self.to_play == self.black_player:
-            self.current_hash ^= self.zobrist_player[1]
-        else:
-            self.current_hash ^= self.zobrist_player[-1]
 
         return self.observation(), 0, False, {}
 

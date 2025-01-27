@@ -27,7 +27,9 @@ from copy import copy, deepcopy
 
 # from alpha_zero.core.mcts_v1 import Node, parallel_uct_search, uct_search
 
-from alpha_zero.core.mcts_v2 import Node, parallel_uct_search, uct_search
+# from alpha_zero.core.mcts_v2 import Node, parallel_uct_search, uct_search
+
+from alpha_zero.core.mcts_m import Node, hybrid_uct_search
 
 from alpha_zero.envs.base import BoardGameEnv
 from alpha_zero.core.eval_dataset import build_eval_dataset
@@ -132,37 +134,23 @@ def create_mcts_player(
         c_puct_init: float,
         warm_up: bool = False,
     ) -> Tuple[int, np.ndarray, float, float, Node]:
-        if num_parallel > 1:
-            return parallel_uct_search(
-                env=env,
-                eval_func=eval_position,
-                root_node=root_node,
-                c_puct_base=c_puct_base,
-                c_puct_init=c_puct_init,
-                num_simulations=num_simulations,
-                num_parallel=num_parallel,
-                root_noise=root_noise,
-                warm_up=warm_up,
-                deterministic=deterministic,
-                use_minimax=use_minimax,
-                k_best=k_best,
-                depth=depth,
-            )
-        else:
-            return uct_search(
-                env=env,
-                eval_func=eval_position,
-                root_node=root_node,
-                c_puct_base=c_puct_base,
-                c_puct_init=c_puct_init,
-                num_simulations=num_simulations,
-                root_noise=root_noise,
-                warm_up=warm_up,
-                deterministic=deterministic,
-                use_minimax=use_minimax,
-                k_best=k_best,
-                depth=depth,
-            )
+        return hybrid_uct_search(
+            env=env,
+            eval_func=eval_position,
+            root_node=root_node,
+            c_puct_base=c_puct_base,
+            c_puct_init=c_puct_init,
+            num_simulations=num_simulations,
+            num_parallel=num_parallel,
+            k_best=k_best,
+            max_depth=depth,
+            root_noise=root_noise,
+            warm_up=warm_up,
+            deterministic=deterministic,
+            num_minimax_threads=4,
+            minimax_time_limit=30.0,
+            max_minimax_leaves=3,
+        )
 
     return act
 

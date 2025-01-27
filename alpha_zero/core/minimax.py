@@ -14,9 +14,13 @@ This module implements a parallel minimax search algorithm optimized for go.
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 import threading
-from typing import List, Set, Dict, Optional, Tuple
+from typing import List, Set, Dict, Optional, Tuple, Callable
 import numpy as np
 import time
+import copy
+
+from alpha_zero.envs.base import BoardGameEnv
+from alpha_zero.core.transposition_table import TranspositionTable, NodeType
 
 @dataclass
 class SearchWindow:
@@ -428,3 +432,42 @@ class ParallelMinimax:
             transposition_table.store(pos_hash, depth, best_value, flag)
             
         return best_value, best_pv
+
+    def process_collected_leaves(
+        self,
+        window: SearchWindow,
+        eval_func: Callable,
+        transposition_table: TranspositionTable,
+    ) -> None:
+        """Process collected leaf nodes in batch.
+        
+        Args:
+            window: Search window containing collected leaves
+            eval_func: Position evaluation function
+            transposition_table: Cache of searched positions
+        """
+        if not window.collected_leaves:
+            return
+
+        # Extract states and paths
+        states, paths = zip(*window.collected_leaves)
+        
+        # Get observations for batch evaluation
+        observations = np.stack([state.observation() for state in states])
+        
+        # Evaluate positions in batch
+        _, values = eval_func(observations, True)
+        
+        # Store results in transposition table
+        with self.tt_lock:
+            for state, path, value in zip(states, paths, values):
+                pos_hash = state.zobrist_hash()
+                transposition_table.store(
+                    pos_hash,
+                    len(path),  # depth
+                    float(value),
+                    NodeType.EXACT
+                )
+        
+        # Clear processed leaves
+        window.collected_leaves.clear()

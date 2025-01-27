@@ -1,4 +1,5 @@
-"""A much faster MCTS-Minimax hybrid implementation for AlphaZero.
+"""
+A much faster MCTS-Minimax hybrid implementation for AlphaZero.
 Where we use Numpy arrays to store node statistics,
 and create child nodes on demand.
 
@@ -55,7 +56,7 @@ from alpha_zero.envs.base import BoardGameEnv
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,  # Change to logging.DEBUG for more detailed output
+    level=logging.INFO,  # Change to logging.DEBUG for even more details
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
@@ -70,6 +71,7 @@ class DummyNode(object):
         self.child_W = collections.defaultdict(float)
         self.child_N = collections.defaultdict(float)
 
+
 class Node:
     """Node in the MCTS search tree."""
 
@@ -79,18 +81,16 @@ class Node:
         num_actions: np.ndarray,
         move: int = None,
         parent: Any = None,
-        depth: int = 0,  # Added to keep track of depth of the node in MCTS tree
+        depth: int = 0,  # track depth of this node in MCTS tree
     ) -> None:
         """
         Args:
             to_play: the id of the current player.
             num_actions: number of total actions, including illegal move.
-            prior: a prior probability of the node for a specific action, could be empty in case of root node.
             move: the action associated with the prior probability.
             parent: the parent node, could be a `DummyNode` if this is the root node.
             depth: the depth of the node in the MCTS tree.
         """
-
         self.to_play = to_play
         self.move = move
         self.parent = parent
@@ -102,22 +102,10 @@ class Node:
         self.child_N = np.zeros(num_actions, dtype=np.float32)
         self.child_P = np.zeros(num_actions, dtype=np.float32)
 
-        self.children: Mapping[int, Node] = {}
+        self.children: Mapping[int, 'Node'] = {}
 
-        # Number of virtual losses on this node, only used in 'parallel_uct_search'
+        # For parallel MCTS: how many virtual losses have been applied on this node
         self.losses_applied = 0
-
-    def child_U(self, c_puct_base: float, c_puct_init: float) -> np.ndarray:
-        """Returns a 1D numpy.array contains prior score for all child."""
-        pb_c = math.log((1 + self.N + c_puct_base) / c_puct_base) + c_puct_init
-        return pb_c * self.child_P * (math.sqrt(self.N) / (1 + self.child_N))
-
-    def child_Q(self) -> np.ndarray:
-        """Returns a 1D numpy.array contains mean action value for all child."""
-        # Avoid division by zero
-        child_N = np.where(self.child_N > 0, self.child_N, 1)
-
-        return self.child_W / child_N
 
     @property
     def N(self) -> float:
@@ -126,7 +114,7 @@ class Node:
 
     @N.setter
     def N(self, value) -> None:
-        """The total number of visits for current node at parent's level."""
+        """Set the total number of visits for current node at parent's level."""
         self.parent.child_N[self.move] = value
 
     @property
@@ -136,12 +124,12 @@ class Node:
 
     @W.setter
     def W(self, value: float) -> None:
-        """The total value for current node is stored at parent's level."""
+        """Set the total value for current node at parent's level."""
         self.parent.child_W[self.move] = value
 
     @property
     def Q(self) -> float:
-        """Returns the mean action value Q(s, a)."""
+        """Mean action value Q(s, a) for this node."""
         if self.parent.child_N[self.move] > 0:
             return self.parent.child_W[self.move] / self.parent.child_N[self.move]
         else:
@@ -149,8 +137,19 @@ class Node:
 
     @property
     def has_parent(self) -> bool:
-        """Check if the node has a parent."""
+        """Check if the node has a parent (i.e. is not the root)."""
         return isinstance(self.parent, Node)
+
+    def child_U(self, c_puct_base: float, c_puct_init: float) -> np.ndarray:
+        """Compute the U = c_puct * P * sqrt(sum(N)) / (1 + N_a) term for each child."""
+        pb_c = math.log((1 + self.N + c_puct_base) / c_puct_base) + c_puct_init
+        return pb_c * self.child_P * (math.sqrt(self.N) / (1 + self.child_N))
+
+    def child_Q(self) -> np.ndarray:
+        """Compute Q for each child as W_a / N_a."""
+        child_N = np.where(self.child_N > 0, self.child_N, 1)
+        return self.child_W / child_N
+
 
 def best_child(
     node: Node,
@@ -159,215 +158,154 @@ def best_child(
     c_puct_init: float,
     child_to_play: int,
 ) -> Node:
-    """Returns best child node with maximum action value Q plus an upper confidence bound U.
-    And creates the selected best child node if not already exists.
+    """Selects the child with the maximum UCB score.
 
     Args:
         node: the current node in the search tree.
-        legal_actions: a 1D bool numpy.array mask for all actions,
-                where `1` represents legal move and `0` represents illegal move.
-        c_puct_base: a float constant determining the level of exploration.
-        c_puct_init: a float constant determining the level of exploration.
-        child_to_play: the player id for children nodes.
+        legal_actions: a 1D bool numpy.array for which moves are legal.
+        c_puct_base: for the UCB exploration term.
+        c_puct_init: for the UCB exploration term.
+        child_to_play: the next player to move in these child nodes.
 
     Returns:
-        The best child node corresponding to the UCT score.
-
-    Raises:
-        ValueError:
-            if the node instance itself is a leaf node.
+        The best child node (creating it if needed).
     """
     if not node.is_expanded:
-        raise ValueError('Expand leaf node first.')
+        raise ValueError('Expand leaf node first before calling best_child.')
 
-    # The child Q value is evaluated from the opponent perspective. when we select the best child for node,
-    # we want to do so from node.to_play's perspective, so we always switch the sign for node.child_Q values,
-    # this is required since we're talking about two-player, zero-sum games.
-
-    # This is hybrid because the minimax value is used to evaluate the node thereby affecting the overall
-    # UCB score of the node. However, it is weighted when backupdating the node's child_Q statistics.
+    # Q is from the child's perspective. We switch sign for the current node's perspective:
     hybrid_ucb_scores = -node.child_Q() + node.child_U(c_puct_base, c_puct_init)
 
     scores = np.where(legal_actions == 1, hybrid_ucb_scores, -9999)
     move = np.argmax(scores)
-
     assert legal_actions[move] == 1
 
     if move not in node.children:
+        logger.info(f"best_child: Creating child node for move={move} at depth={node.depth+1}.")
         node.children[move] = Node(
-            to_play=child_to_play, num_actions=node.num_actions, move=move, parent=node, depth=node.depth + 1
+            to_play=child_to_play,
+            num_actions=node.num_actions,
+            move=move,
+            parent=node,
+            depth=node.depth + 1
         )
+
+    logger.info(
+        f"best_child: Node depth={node.depth}, picking move={move} with UCB score={scores[move]:.4f}"
+    )
 
     return node.children[move]
 
 
 def expand(
-    node: Node, 
-    prior_prob: np.ndarray, 
-    env_hash: int, 
+    node: Node,
+    prior_prob: np.ndarray,
+    env_hash: int,
     mcts_prior_map: Dict[Tuple[int, int], float]
 ) -> None:
-    """Expand all actions, including illegal actions.
-
-    Args:
-        node: current leaf node in the search tree.
-        prior_prob: 1D numpy.array contains prior probabilities of the state for all actions.
-        env_hash: zobrist hash of the current board position
-        mcts_prior_map: dictionary to store action priors for minimax search
-
-    Raises:
-        ValueError:
-            if node instance already expanded.
-            if input argument `prior` is not a valid 1D float numpy.array.
-    """
+    """Expand a leaf node: assign child prior probabilities and mark is_expanded=True."""
     if node.is_expanded:
-        raise RuntimeError('Node already expanded.')
+        raise RuntimeError('Node is already expanded.')
+
     if (
         not isinstance(prior_prob, np.ndarray)
         or len(prior_prob.shape) != 1
         or prior_prob.dtype not in (np.float32, np.float64)
     ):
-        raise ValueError(f'Expect `prior_prob` to be a 1D float numpy.array, got {prior_prob}')
+        raise ValueError("prior_prob must be a 1D float array.")
 
     node.child_P = prior_prob
     node.is_expanded = True
 
-    # Store priors for non-zero probability actions
+    # Store priors in mcts_prior_map for Minimax ordering
     for action, p in enumerate(prior_prob):
         if p > 0:
-            mcts_prior_map[(env_hash, action)] = float(p)  # Convert to float to ensure compatibility
+            mcts_prior_map[(env_hash, action)] = float(p)
+
+    logger.info(
+        f"expand: Expanded node at depth={node.depth}, assigned priors for {len(prior_prob)} actions."
+    )
+
 
 def confidence_weighted_value(mcts_value: float, minimax_value: float) -> float:
-    """Combine MCTS and Minimax values using a confidence-weighted approach.
-
-    Args:
-        mcts_value: the evaluation value evaluated from MCTS algorithm.
-        minimax_value: the evaluation value evaluated from minimax algorithm.
-
-    Returns:
-        a float value represents the combined evaluation value.
-
-    Raises:
-        ValueError:
-            if input argument `value` is not float data type.
-    """
-    if not isinstance(mcts_value, float) or not isinstance(minimax_value, float):
-        raise ValueError("Both mcts_value and minimax_value must be floats.")
-
-    # Need testing to determine the best value for max_use_minimax_depth
-    # It determines the depth at which the minimax value is used exclusively
+    """Combine MCTS vs. Minimax values via a confidence-based approach."""
     diff = abs(mcts_value - minimax_value)
 
+    # Example simple approach:
     if diff < 0.2:
-        # Weighted towards MCTS
+        # Weighted more towards MCTS if they're close
         alpha = 0.7
     else:
-        # Weighted towards Minimax
+        # Weighted more towards Minimax if they disagree significantly
         alpha = 0.3
 
-    return alpha * mcts_value + (1 - alpha) * minimax_value
+    combined = alpha * mcts_value + (1 - alpha) * minimax_value
+    logger.info(
+        f"confidence_weighted_value: MCTS={mcts_value:.3f}, Minimax={minimax_value:.3f}, "
+        f"Diff={diff:.3f}, alpha={alpha:.2f}, Combined={combined:.3f}"
+    )
+    return combined
+
 
 def backup(node: Node, mcts_value: float, minimax_value: float) -> None:
-    """Update statistics of the node and all traversed parent nodes.
-
-    Args:
-        node: current leaf node in the search tree.
-        mcts_value: the evaluation value evaluated from 'the mcts algorithm of the current player's perspective.
-        minimax_value: the evaluation value evaluated from minimax algorithm of the current player's perspective.
-
-    Raises:
-        ValueError:
-            if input argument `value` is not float data type.
-    """
-
-    if not isinstance(mcts_value, float) or not isinstance(minimax_value, float):
-        raise ValueError("Both mcts_value and minimax_value must be floats.")
-
-    # Need testing to determine the best weights for the confidence-weighted approach
+    """Backpropagates results up the tree from a leaf to the root."""
     combined_value = confidence_weighted_value(mcts_value, minimax_value)
+    original_combined = combined_value
+
+    logger.info(
+        f"backup: Starting from leaf at depth={node.depth}, MCTS={mcts_value:.3f}, "
+        f"Minimax={minimax_value:.3f}, Combined={original_combined:.3f}"
+    )
 
     while isinstance(node, Node):
         node.N += 1
         node.W += combined_value
+        logger.info(
+            f"backup: Node depth={node.depth}, updated N={node.N}, W={node.W:.3f} "
+            f"(combined_value={combined_value:.3f})"
+        )
         node = node.parent
-        combined_value = -1 * combined_value
+        combined_value = -combined_value  # flip sign for the parent
 
 
 def add_dirichlet_noise(node: Node, legal_actions: np.ndarray, eps: float = 0.25, alpha: float = 0.03) -> None:
-    """Add dirichlet noise to a given node.
-
-    Args:
-        node: the root node we want to add noise to.
-        legal_actions: a 1D bool numpy.array mask for all actions,
-            where `1` represents legal move and `0` represents illegal move.
-        eps: epsilon constant to weight the priors vs. dirichlet noise.
-        alpha: parameter of the dirichlet noise distribution.
-
-    Raises:
-        ValueError:
-            if input argument `node` is not expanded.
-            if input argument `eps` or `alpha` is not float type
-                or not in the range of [0.0, 1.0].
-    """
-
+    """Adds Dirichlet noise to the root node's prior probabilities for exploration."""
     if not isinstance(node, Node) or not node.is_expanded:
-        raise ValueError('Expect `node` to be expanded')
+        raise ValueError('Expect `node` to be an expanded Node.')
     if not isinstance(eps, float) or not 0.0 <= eps <= 1.0:
-        raise ValueError(f'Expect `eps` to be a float in the range [0.0, 1.0], got {eps}')
+        raise ValueError(f'eps must be in [0,1], got {eps}')
     if not isinstance(alpha, float) or not 0.0 <= alpha <= 1.0:
-        raise ValueError(f'Expect `alpha` to be a float in the range [0.0, 1.0], got {alpha}')
+        raise ValueError(f'alpha must be in [0,1], got {alpha}')
 
     alphas = np.ones_like(legal_actions) * alpha
     noise = legal_actions * np.random.dirichlet(alphas)
 
     node.child_P = node.child_P * (1 - eps) + noise * eps
 
+    logger.info("add_dirichlet_noise: Applied Dirichlet noise to root node's prior probabilities.")
+
 
 def generate_search_policy(child_N: np.ndarray, temperature: float, legal_actions: np.ndarray) -> np.ndarray:
-    """Returns a policy action probabilities after MCTS search,
-    proportional to its exponentiated visit count.
+    """Convert visit counts to a probability distribution for move selection."""
+    if not isinstance(temperature, float) or not (0 < temperature <= 1.0):
+        raise ValueError("temperature must be in (0,1].")
 
-    Args:
-        child_N: the visit number of the children nodes from the root node of the search tree.
-        temperature: a parameter controls the level of exploration.
-        legal_actions: a 1D bool numpy.array mask for all actions,
-            where `1` represents legal move and `0` represents illegal move.
-
-    Returns:
-        a 1D numpy.array contains the action probabilities after MCTS search.
-
-    Raises:
-        ValueError:
-            if input argument `temperature` is not float type or not in range (0.0, 1.0].
-    """
-    if not isinstance(temperature, float) or not 0 < temperature <= 1.0:
-        raise ValueError(f'Expect `temperature` to be float type in the range (0.0, 1.0], got {temperature}')
-
-    child_N = legal_actions * child_N
-
+    visits = child_N.copy()
+    visits = legal_actions * visits
     if temperature > 0.0:
-        # Simple hack to avoid overflow when call np.power over large numbers
         exp = max(1.0, min(5.0, 1.0 / temperature))
-        child_N = np.power(child_N, exp)
+        visits = np.power(visits, exp)
 
-    assert np.all(child_N >= 0) and not np.any(np.isnan(child_N))
-    pi_probs = child_N
-    sums = np.sum(pi_probs)
+    sums = np.sum(visits)
     if sums > 0:
-        pi_probs /= sums
+        visits /= sums
 
-    return pi_probs
+    logger.info("generate_search_policy: Generated policy distribution from child visit counts.")
+    return visits
+
 
 def add_virtual_loss(node: Node) -> None:
-    """Propagate a virtual loss to the traversed path.
-
-    Args:
-        node: current leaf node in the search tree.
-    """
-    # This is a loss for both players in the traversed path,
-    # since we want to avoid multiple threads to select the same path.
-    # However since we'll be switching the sign for child_Q when selecting the best child,
-    # here we use +1 instead of -1.
+    """Add a virtual loss to discourage multiple threads exploring the same path."""
     vloss = +1
     while isinstance(node, Node):
         node.losses_applied += 1
@@ -376,18 +314,14 @@ def add_virtual_loss(node: Node) -> None:
 
 
 def revert_virtual_loss(node: Node) -> None:
-    """Undo virtual loss to the traversed path.
-
-    Args:
-        node: current leaf node in the search tree.
-    """
-
+    """Undo a previously-applied virtual loss."""
     vloss = -1
     while isinstance(node, Node):
         if node.losses_applied > 0:
             node.losses_applied -= 1
             node.W += vloss
         node = node.parent
+
 
 def hybrid_uct_search(
     env: BoardGameEnv,
@@ -399,24 +333,20 @@ def hybrid_uct_search(
     num_parallel: int,
     k_best: int,
     max_depth: int,
+    num_minimax_threads: int = 4,
+    minimax_time_limit: float = 30.0,
+    max_minimax_leaves: int = 3,  # Only run Minimax on top X leaves
     root_noise: bool = False,
     warm_up: bool = False,
     deterministic: bool = False,
-    num_minimax_threads: int = 4,
-    minimax_time_limit: float = 30.0,
-    max_minimax_leaves: int = 3,  # NEW: Only run Minimax on top 20 leaves, for instance
 ) -> Tuple[int, np.ndarray, float, float, Node]:
-    """
-    Hybrid search combining MCTS with parallel minimax, but selectively applying Minimax
-    only to a few top-ranked leaves in each MCTS batch.
-    """
+    """Hybrid MCTS–Minimax search, with selective Minimax application and confidence weighting."""
     if not isinstance(env, BoardGameEnv):
-        raise ValueError(f'Expect `env` to be a valid BoardGameEnv instance, got {env}')
-    if not 1 <= num_simulations:
-        raise ValueError(f'Expect `num_simulations` to be a positive integer, got {num_simulations}')
+        raise ValueError(f"Expect `env` to be a valid BoardGameEnv instance, got {env}")
     if env.is_game_over():
-        raise RuntimeError('Game is over.')
+        raise RuntimeError("Game is already over.")
 
+    logger.info("hybrid_uct_search: Starting hybrid MCTS-Minimax search.")
     start_time = time.perf_counter()
 
     # Initialize parallel minimax searcher
@@ -428,94 +358,98 @@ def hybrid_uct_search(
         time_limit=minimax_time_limit
     )
 
-     # Initialize transposition table
+    # Create or load a transposition table
     transposition_table = TranspositionTable()
 
-    # Initialize MCTS map
+    # A map of (zobrist_hash, action) -> prior for better move ordering in Minimax
     mcts_prior_map: Dict[Tuple[int, int], float] = {}
 
-    # Create root node if needed
+    # If we have no root node, build one
     if root_node is None:
-        prior_prob, value = eval_func(env.observation(), False)
-        root_node = Node(to_play=env.to_play, num_actions=env.action_dim, parent=DummyNode())
-        expand(root_node, prior_prob, env.hash(), mcts_prior_map)  # The expand call might differ in your code
-        backup(root_node, value, value)
+        logger.info("hybrid_uct_search: Creating new root node.")
+        prior_prob, init_value = eval_func(env.observation(), False)
+        root_node = Node(
+            to_play=env.to_play,
+            num_actions=env.action_dim,
+            parent=DummyNode()
+        )
+        expand(root_node, prior_prob, env.hash(), mcts_prior_map)
+        backup(root_node, init_value, init_value)
 
     assert root_node.to_play == env.to_play
-    root_legal_actions = env.legal_actions
 
-    # Add Dirichlet noise if requested (for exploration at the root)
+    # Optionally add Dirichlet noise at the root for exploration
+    root_legal_actions = env.legal_actions
     if root_noise:
         add_dirichlet_noise(root_node, root_legal_actions)
+        logger.info("hybrid_uct_search: Added Dirichlet noise to root node's prior.")
 
-   
     # ----------------------------
     # Main MCTS Loop
     # ----------------------------
+    logger.info(f"hybrid_uct_search: Starting main MCTS loop with up to {num_simulations} simulations.")
     while root_node.N < num_simulations + num_parallel:
         leaves = []
         failsafe = 0
 
-        # 1) SELECTION: Collect up to num_parallel leaves
+        # Collect up to num_parallel leaves for batch processing
         while len(leaves) < num_parallel and failsafe < num_parallel * 2:
             failsafe += 1
             node = root_node
-
-            # Copy the environment for simulation
             sim_env = copy.deepcopy(env)
-            obs = sim_env.observation()
             done = sim_env.is_game_over()
 
-            # Follow best_child() down until leaf or terminal
+            # DESCENT: Follow best_child down until an unexpanded node or terminal
             while node.is_expanded and not done:
                 node = best_child(node, sim_env.legal_actions, c_puct_base, c_puct_init, sim_env.opponent_player)
-                obs, reward, done, _ = sim_env.step(node.move)
+                _, reward, done, _ = sim_env.step(node.move)
 
-            assert node.to_play == sim_env.to_play
-
-            # If terminal, directly back up final reward
             if done:
-                # The sign is reversed because from node.to_play's perspective, reward is the opponent's result
+                logger.info(f"MCTS selection: reached terminal state, reward={reward:.3f}.")
                 backup(node, -reward, -reward)
                 continue
 
+            # Not terminal, so we have a leaf
             add_virtual_loss(node)
-            leaves.append((node, obs))
+            leaves.append((node, sim_env.observation()))
 
-        # 2) EVALUATION (Neural Net + Selective Minimax)
+        # EVALUATION PHASE
         if leaves:
-            # Evaluate all leaves via the neural net (policy + value)
+            # Evaluate all leaves in one batch with the neural net
             batched_nodes, batched_obs = map(list, zip(*leaves))
             prior_probs, mcts_values = eval_func(np.stack(batched_obs, axis=0), True)
 
-            # ---- NEW: Rank leaves, choose top few for Minimax ----
+            logger.info(f"hybrid_uct_search: Collected {len(leaves)} leaves, evaluating with NN, then Minimax on top {max_minimax_leaves}.")
+
+            # Sort leaves by some priority measure (example: absolute MCTS value, plus a small depth bonus)
             leaf_indices = list(range(len(batched_nodes)))
             leaf_indices.sort(
                 key=lambda i: (
-                    abs(mcts_values[i])              # Magnitude of MCTS value
-                    + 0.2 * (1.0 - batched_nodes[i].depth / 30)  # Example depth bonus
+                    abs(mcts_values[i])
+                    + 0.2 * (1.0 - batched_nodes[i].depth / 30)  # example depth factor
                 ),
                 reverse=True
             )
             top_leaf_indices = leaf_indices[:max_minimax_leaves]
 
-            # Build envs only for top Minimax leaves
+            # Build environments for top leaves
             minimax_envs = []
             for idx in top_leaf_indices:
                 node_i = batched_nodes[idx]
-                # Re-simulate from root to that leaf
                 sim_env = copy.deepcopy(env)
-                replay_path = []
+
+                # Replay moves from root to node_i
+                path = []
                 cur = node_i
                 while cur.has_parent:
-                    replay_path.append(cur.move)
+                    path.append(cur.move)
                     cur = cur.parent
-                for move in reversed(replay_path):
+                for move in reversed(path):
                     sim_env.step(move)
 
-                minimax_envs.append((idx, sim_env))  # (index, environment)
+                minimax_envs.append((idx, sim_env))
 
-            # Run parallel Minimax on these top leaves
+            # Run Minimax on top leaves
             minimax_results = {}
             for (idx, sim_env) in minimax_envs:
                 val, _ = parallel_minimax.iterative_deepening_search(
@@ -524,28 +458,30 @@ def hybrid_uct_search(
                     max_depth,
                     k_best,
                     transposition_table,
-                    mcts_prior_map
+                    mcts_prior_map  # pass the MCTS priors
                 )
                 minimax_results[idx] = val
+                logger.info(f"Minimax: Leaf index={idx}, depth={batched_nodes[idx].depth}, Minimax value={val:.3f}")
 
-            # 3) BACKUP: Combine MCTS + Minimax for each leaf
+            # BACKUP for each leaf
             for i, (leaf_node, prior_prob, mcts_val) in enumerate(zip(batched_nodes, prior_probs, mcts_values)):
                 revert_virtual_loss(leaf_node)
 
                 # Expand if not expanded
                 if not leaf_node.is_expanded:
-                    expand(leaf_node, prior_prob, env.hash(), mcts_prior_map)  # adapt if needed
+                    expand(leaf_node, prior_prob, env.hash(), mcts_prior_map)
 
+                # Combine MCTS & Minimax or fallback if not in top
                 if i in minimax_results:
-                    # For top leaves, use the Minimax result
                     backup(leaf_node, mcts_val, minimax_results[i])
                 else:
-                    # For non-top leaves, skip Minimax and back up MCTS only (or do an approximate approach)
+                    # If we didn't run Minimax, back up MCTS alone or do a simpler fallback
                     backup(leaf_node, mcts_val, mcts_val)
 
     # -----------------------------------------
-    # Move Selection after MCTS completes
+    # Move Selection
     # -----------------------------------------
+    logger.info("hybrid_uct_search: MCTS complete, selecting move from root_node.")
     search_pi = generate_search_policy(
         root_node.child_N,
         1.0 if warm_up else 0.1,
@@ -556,16 +492,18 @@ def hybrid_uct_search(
     next_root_node = None
     best_child_Q = 0.0
 
-    # Deterministic vs. probabilistic selection
     if deterministic:
         move = np.argmax(root_node.child_N)
+        logger.info(f"Move Selection: Deterministic, chose move={move} with max visits.")
     else:
+        # Sample from the search distribution
         while move is None or (warm_up and env.has_pass_move and move == env.pass_move) or root_legal_actions[move] != 1:
             move = np.random.choice(np.arange(search_pi.shape[0]), p=search_pi)
+        logger.info(f"Move Selection: Sampled move={move} from search_pi distribution.")
 
-    # If chosen move already in children, preserve that subtree
     if move in root_node.children:
         next_root_node = root_node.children[move]
+        # Keep stats for the new root
         N, W = copy.copy(next_root_node.N), copy.copy(next_root_node.W)
         next_root_node.parent = DummyNode()
         next_root_node.move = None
@@ -573,9 +511,7 @@ def hybrid_uct_search(
         next_root_node.W = W
         best_child_Q = -next_root_node.Q
 
-    assert root_legal_actions[move] == 1
-
     end_time = time.perf_counter()
-    logger.info(f"Total search time: {end_time - start_time:.2f}s")
+    logger.info(f"hybrid_uct_search: Completed in {end_time - start_time:.2f}s. Final chosen move={move}.")
 
     return move, search_pi, root_node.Q, best_child_Q, next_root_node

@@ -83,6 +83,8 @@ class GoEnv(BoardGameEnv):
         self.board = self.position.board
         self.legal_actions = self.position.all_legal_moves()
 
+        self.current_hash = self.compute_zobrist_hash()  # Recompute hash for new position
+
         return self.observation()
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool, dict]:
@@ -113,8 +115,9 @@ class GoEnv(BoardGameEnv):
             # Resign is always a loss for the player, no need to evaluate the board for score
             self.winner = self.black_player if self.last_player == self.white_player else self.white_player
 
-            # Switch next player
+            # Switch next player and update hash
             self.to_play = self.position.to_play
+            self.current_hash = self.compute_zobrist_hash()  # Update hash after position change
 
             return self.observation(), -1, True, {}
 
@@ -128,6 +131,9 @@ class GoEnv(BoardGameEnv):
         self.position = self.position.play_move(c=self.cc.from_flat(action), color=self.to_play, mutate=True)
         self.board = self.position.board
         self.legal_actions = self.position.all_legal_moves()
+
+        # Need to add:
+        self.current_hash = self.compute_zobrist_hash()  # Update hash after position change
 
         # Make sure the latest board position is always at index 0
         self.board_deltas.appendleft(np.copy(self.board))
@@ -208,3 +214,7 @@ class GoEnv(BoardGameEnv):
             komi=self.komi,
             date=get_time_stamp(),
         )
+
+    def hash(self) -> int:
+        """Returns the Zobrist hash of the current board state."""
+        return self.current_hash

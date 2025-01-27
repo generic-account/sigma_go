@@ -10,6 +10,9 @@ import os
 import sys
 import torch
 
+# Add project root to Python path
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 FLAGS = flags.FLAGS
 flags.DEFINE_integer('board_size', 9, 'Board size for Go.')
 flags.DEFINE_float('komi', 7.5, 'Komi rule for Go.')
@@ -34,7 +37,7 @@ flags.DEFINE_string(
 )
 flags.DEFINE_string(
     'white_ckpt',
-    './checkpoints/go/9x9/training_steps_154000.ckpt',
+    './checkpoints/go/9x9/training_steps_139000.ckpt',
     'Load the checkpoint file for white player.',
 )
 
@@ -45,7 +48,7 @@ flags.DEFINE_integer(
     'Number of leaves to collect before using the neural network to evaluate the positions during MCTS search, 1 means no parallel search.',
 )
 
-flags.DEFINE_integer('depth', 3, 'Depth of minimax search')
+flags.DEFINE_integer('depth', 3, 'Max depth of minimax search')
 flags.DEFINE_integer('k_best', 5, 'The number of best actions to consider in minimax search.')
 flags.DEFINE_integer('num_minimax_threads', 4, 'Number of threads for parallel minimax search')
 flags.DEFINE_float('minimax_time_limit', 30.0, 'Time limit in seconds for minimax search')
@@ -115,11 +118,11 @@ def main():
             num_parallel=FLAGS.num_parallel,
             k_best=FLAGS.k_best,
             depth=FLAGS.depth,
-            root_noise=False,
-            deterministic=True,
             num_minimax_threads=FLAGS.num_minimax_threads,
             minimax_time_limit=FLAGS.minimax_time_limit,
             max_minimax_leaves=FLAGS.max_minimax_leaves,
+            root_noise=False,
+            deterministic=True,
         )
 
     # Wrap MCTS player for the GUI program

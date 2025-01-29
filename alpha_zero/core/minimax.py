@@ -239,11 +239,11 @@ class ParallelMinimax:
                 if should_collect_leaf(search_env, current_depth):
                     with window.lock:
                         window.collected_leaves.append((
-                            search_env.clone(),
+                            copy.deepcopy(search_env),
                             path.copy()
                         ))
                     if len(window.collected_leaves) >= self.batch_size:
-                        self.process_collected_leaves(window, eval_func, transposition_table)
+                        self.evaluation_event.set()
                     return
                     
                 legal_actions = np.where(search_env.legal_actions == 1)[0]

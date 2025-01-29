@@ -76,6 +76,7 @@ class ParallelMinimax:
         self.num_threads = num_threads
         self.min_batch_size = min_batch_size
         self.max_batch_size = max_batch_size
+        #self.batch_size = 
         self.virtual_loss = virtual_loss
         self.time_limit = time_limit
         self.tt_lock = threading.Lock()
@@ -98,7 +99,6 @@ class ParallelMinimax:
         max_depth: int,
         k_best: int,
         transposition_table: TranspositionTable,
-        # NEW: pass in the MCTS prior map
         mcts_prior_map: Dict[Tuple[int, int], float] = None,
     ) -> Tuple[float, List[int]]:
         """

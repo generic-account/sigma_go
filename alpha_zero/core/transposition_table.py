@@ -21,6 +21,10 @@ class TranspositionTable:
         self.table = {}
         self.size = size
 
+    def __len__(self) -> int:
+        """Return the number of entries in the table."""
+        return len(self.table)
+
     def store(self, zobrist_hash: Any, depth: int, value: float, flag: NodeType) -> None:
         """
         Store a new entry in the transposition table.

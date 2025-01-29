@@ -11,15 +11,15 @@ class TranspositionTable:
     """
     Transposition Table for storing and retrieving previously computed states.
     """
-    def __init__(self, size=1000000):
+    def __init__(self, max_size=1000000):
         """
         Initialize the transposition table with a given size.
 
         Args:
-            size: The maximum number of entries the table can hold.
+            max_size: The maximum number of entries the table can hold.
         """
         self.table = {}
-        self.size = size
+        self.max_size = max_size
 
     def __len__(self) -> int:
         """Return the number of entries in the table."""
@@ -35,7 +35,7 @@ class TranspositionTable:
             value: The evaluation value of the current state.
             flag: The type of node (EXACT, LOWERBOUND, UPPERBOUND).
         """
-        if len(self.table) >= self.size:
+        if len(self.table) >= self.max_size:
             self.table.pop(next(iter(self.table)))
         self.table[zobrist_hash] = (depth, value, flag)
     

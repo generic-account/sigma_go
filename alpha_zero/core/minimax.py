@@ -76,7 +76,7 @@ class ParallelMinimax:
         self.num_threads = num_threads
         self.min_batch_size = min_batch_size
         self.max_batch_size = max_batch_size
-        #self.batch_size = 
+        self.batch_size = max_batch_size 
         self.virtual_loss = virtual_loss
         self.time_limit = time_limit
         self.tt_lock = threading.Lock()
@@ -239,11 +239,11 @@ class ParallelMinimax:
                 if should_collect_leaf(search_env, current_depth):
                     with window.lock:
                         window.collected_leaves.append((
-                            copy.deepcopy(search_env),
+                            search_env.clone(),
                             path.copy()
                         ))
                     if len(window.collected_leaves) >= self.batch_size:
-                        self.evaluation_event.set()
+                        self.process_collected_leaves(window, eval_func, transposition_table)
                     return
                     
                 legal_actions = np.where(search_env.legal_actions == 1)[0]
@@ -458,14 +458,16 @@ class ParallelMinimax:
         # Evaluate positions in batch
         _, values = eval_func(observations, True)
         
-        # Store results in transposition table
+        # Store results in transposition table - ensure values are properly negated based on player
         with self.tt_lock:
             for state, path, value in zip(states, paths, values):
                 pos_hash = state.zobrist_hash()
+                # Negate value if it's player 2's turn (current_player == -1)
+                adjusted_value = float(value) * (1 if state.current_player == 1 else -1)
                 transposition_table.store(
                     pos_hash,
                     len(path),  # depth
-                    float(value),
+                    adjusted_value,
                     NodeType.EXACT
                 )
         

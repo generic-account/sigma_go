@@ -462,12 +462,10 @@ class ParallelMinimax:
         with self.tt_lock:
             for state, path, value in zip(states, paths, values):
                 pos_hash = state.zobrist_hash()
-                # Negate value if it's player 2's turn (current_player == -1)
-                adjusted_value = float(value) * (1 if state.current_player == 1 else -1)
                 transposition_table.store(
                     pos_hash,
                     len(path),  # depth
-                    adjusted_value,
+                    float(value),
                     NodeType.EXACT
                 )
         

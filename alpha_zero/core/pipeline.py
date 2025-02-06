@@ -27,7 +27,7 @@ from copy import copy, deepcopy
 
 # from alpha_zero.core.mcts_v1 import Node, parallel_uct_search, uct_search
 
-# from alpha_zero.core.mcts_v2 import Node, parallel_uct_search, uct_search
+from alpha_zero.core.mcts_v2 import parallel_uct_search
 
 from alpha_zero.core.mcts_m import Node, hybrid_uct_search
 
@@ -87,13 +87,14 @@ def create_mcts_player(
     device: torch.device,
     num_simulations: int,
     num_parallel: int,
-    k_best: int,
-    depth: int,
-    num_minimax_threads: int,
-    minimax_time_limit: float,
-    max_minimax_leaves: int,
+    k_best: int = None,
+    depth: int = None,
+    num_minimax_threads: int = None,
+    minimax_time_limit: float = None,
+    max_minimax_leaves: int = None,
     root_noise: bool = False,
     deterministic: bool = False,
+    use_minimax: bool = False,
 ) -> Callable[[BoardGameEnv, Node, float, float, bool], Tuple[int, np.ndarray, float, float, Node]]:
     @torch.no_grad()
     def eval_position(
@@ -136,23 +137,41 @@ def create_mcts_player(
         c_puct_init: float,
         warm_up: bool = False,
     ) -> Tuple[int, np.ndarray, float, float, Node]:
-        return hybrid_uct_search(
-            env=env,
-            eval_func=eval_position,
-            root_node=root_node,
-            c_puct_base=c_puct_base,
-            c_puct_init=c_puct_init,
-            num_simulations=num_simulations,
-            num_parallel=num_parallel,
-            k_best=k_best,
-            max_depth=depth,
-            num_minimax_threads=num_minimax_threads,
-            minimax_time_limit=minimax_time_limit,
-            max_minimax_leaves=max_minimax_leaves,
-            root_noise=root_noise,
-            warm_up=warm_up,
-            deterministic=deterministic,
-        )
+        if use_minimax:
+            # Use hybrid MCTS-Minimax search
+            return hybrid_uct_search(
+                env=env,
+                eval_func=eval_position,
+                root_node=root_node,
+                c_puct_base=c_puct_base,
+                c_puct_init=c_puct_init,
+                num_simulations=num_simulations,
+                num_parallel=num_parallel,
+                k_best=k_best,
+                max_depth=depth,
+                num_minimax_threads=num_minimax_threads,
+                minimax_time_limit=minimax_time_limit,
+                max_minimax_leaves=max_minimax_leaves,
+                root_noise=root_noise,
+                warm_up=warm_up,
+                deterministic=deterministic,
+            )
+        else:
+            # Use pure MCTS search
+            return parallel_uct_search(
+                env=env,
+                eval_func=eval_position,
+                root_node=root_node,
+                c_puct_base=c_puct_base,
+                c_puct_init=c_puct_init,
+                num_simulations=num_simulations,
+                num_parallel=num_parallel,
+                k_best=5,  
+                depth=3,   
+                root_noise=root_noise,
+                warm_up=warm_up,
+                deterministic=deterministic,
+            )
 
     return act
 

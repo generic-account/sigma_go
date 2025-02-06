@@ -9,12 +9,16 @@ from typing import Tuple, Mapping, Text
 import re
 from copy import copy
 import numpy as np
+import logging
 
 from alpha_zero.envs.base import BoardGameEnv
 from alpha_zero.envs import go_engine as go
 from alpha_zero.utils import sgf_wrapper
 from alpha_zero.utils.util import get_time_stamp
+from alpha_zero.envs.coords import CoordsConvertor
 
+# Configure logging
+logger = logging.getLogger(__name__)
 
 class GoEnv(BoardGameEnv):
     """Gym environment for board game Go.
@@ -94,6 +98,24 @@ class GoEnv(BoardGameEnv):
         if action is not None and action != self.resign_move and not 0 <= int(action) <= self.action_space.n - 1:
             raise ValueError(f'Invalid action. The action {action} is out of bound.')
         if action is not None and action != self.resign_move and self.legal_actions[int(action)] != 1:
+            # Log details about the illegal move
+            coords = self.cc.from_flat(action)
+            gtp_move = self.cc.to_gtp(coords)
+            player = 'Black' if self.to_play == self.black_player else 'White'
+            logger.warning(f"Illegal move detected - Player: {player}, Move: {gtp_move}, Coords: {coords}")
+            logger.warning(f"Board state at move:")
+            logger.warning(str(self.position))
+            logger.warning(f"Legal moves mask: {self.legal_actions}")
+            
+            # Check specific reasons for illegality
+            if coords is not None:
+                if self.position.board[coords] != go.EMPTY:
+                    logger.warning(f"Move {gtp_move} is illegal: Position already occupied")
+                elif coords == self.position.ko:
+                    logger.warning(f"Move {gtp_move} is illegal: Ko rule violation")
+                elif self.position.is_move_suicidal(coords):
+                    logger.warning(f"Move {gtp_move} is illegal: Suicidal move")
+            
             raise ValueError(f'Illegal action {action}.')
 
         self.last_move = copy(int(action))

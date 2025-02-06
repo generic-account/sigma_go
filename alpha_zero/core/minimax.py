@@ -14,7 +14,7 @@ This module implements a parallel minimax search algorithm optimized for go.
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor
 import threading
-from typing import List, Set, Dict, Optional, Tuple, Callable
+from typing import List, Set, Dict, Optional, Tuple, Callable, Iterable
 import numpy as np
 import time
 import copy
@@ -54,6 +54,9 @@ class ParallelMinimax:
         time_limit: Maximum search time in seconds
         tt_lock: Lock for transposition table access
         evaluation_event: Event to trigger batch evaluation
+        base_k: Base number of moves to consider at each node
+        min_k: Minimum number of moves to consider
+        max_k: Maximum number of moves to consider
     """
     
     def __init__(
@@ -62,7 +65,10 @@ class ParallelMinimax:
         min_batch_size: int = 16,
         max_batch_size: int = 128,
         virtual_loss: float = 0.1,
-        time_limit: float = 30.0  # seconds
+        time_limit: float = 30.0,  # seconds
+        base_k: int = 5,  # Base number of moves to consider at each node
+        min_k: int = 3,  # Minimum number of moves to consider
+        max_k: int = 20,  # Maximum number of moves to consider
     ):
         """Initialize the parallel minimax searcher.
         
@@ -72,6 +78,9 @@ class ParallelMinimax:
             max_batch_size: Maximum positions per batch evaluation
             virtual_loss: Virtual loss value to discourage thread collision
             time_limit: Maximum search time in seconds
+            base_k: Base number of moves to consider at each node
+            min_k: Minimum number of moves to consider
+            max_k: Maximum number of moves to consider
         """
         self.num_threads = num_threads
         self.min_batch_size = min_batch_size
@@ -82,6 +91,11 @@ class ParallelMinimax:
         self.tt_lock = threading.Lock()
         self.evaluation_event = threading.Event()
         
+        # Parameters for dynamic k-best selection
+        self.base_k = base_k
+        self.min_k = min_k
+        self.max_k = max_k
+        
     def get_dynamic_batch_size(self, depth: int, max_depth: int) -> int:
         """Dynamically adjust batch size based on search depth."""
         depth_ratio = depth / max_depth
@@ -91,6 +105,60 @@ class ParallelMinimax:
             self.min_batch_size
         )
         return max(self.min_batch_size, min(batch_size, self.max_batch_size))
+        
+    def get_dynamic_k(
+        self,
+        depth: int,
+        max_depth: int,
+        move_scores: Dict[int, float],
+        legal_actions: np.ndarray,
+        mcts_prior_map: Dict[Tuple[int, int], float] = None,
+        pos_hash: Optional[int] = None,
+    ) -> int:
+        """Calculate dynamic k-best value based on position complexity and depth.
+        
+        Args:
+            depth: Current search depth
+            max_depth: Maximum search depth
+            move_scores: Dictionary of move scores
+            legal_actions: Boolean mask of legal moves
+            mcts_prior_map: Optional dictionary of MCTS priors
+            pos_hash: Optional hash of current position
+            
+        Returns:
+            Number of moves to consider
+        """
+        # Base k value that decreases with depth
+        depth_ratio = depth / max_depth
+        k = int(self.base_k * (1 + np.exp(-2 * depth_ratio)))
+        
+        # Adjust based on move score distribution
+        if move_scores:
+            scores = np.array([move_scores.get(a, 0.0) for a in range(len(legal_actions))])
+            scores = scores[legal_actions == 1]  # Only consider legal moves
+            if len(scores) > 0:
+                # Calculate score spread
+                score_range = np.max(scores) - np.min(scores)
+                # Increase k if moves have similar scores
+                if score_range < 0.2:  # Threshold for "similar" scores
+                    k = int(k * 1.5)
+                    
+        # Consider MCTS priors if available
+        if mcts_prior_map and pos_hash is not None:
+            priors = []
+            for action in range(len(legal_actions)):
+                if legal_actions[action]:
+                    prior = mcts_prior_map.get((pos_hash, action), 0.0)
+                    priors.append(prior)
+            if priors:
+                priors = np.array(priors)
+                # If priors are concentrated, reduce k
+                top_prior_sum = np.sum(np.sort(priors)[-3:])  # Sum of top 3 priors
+                if top_prior_sum > 0.7:  # If top moves have high probability
+                    k = int(k * 0.7)
+                    
+        # Ensure k stays within bounds
+        return max(self.min_k, min(k, self.max_k))
         
     def iterative_deepening_search(
         self,
@@ -162,19 +230,20 @@ class ParallelMinimax:
         env: BoardGameEnv,
         eval_func: Callable,
         depth: int,
-        k_best: int,
+        k_best: int,  # This is now used as a maximum k
         transposition_table: TranspositionTable,
         move_scores: Dict[int, float],
         mcts_prior_map: Dict[Tuple[int, int], float] = None,
     ) -> Tuple[float, List[int]]:
         """
         Enhanced parallel minimax search that returns principal variation.
+        Now uses dynamic k-best selection.
         
         Args:
             env: Board game environment
             eval_func: Position evaluation function
             depth: Current search depth
-            k_best: Number of best moves to consider
+            k_best: Maximum number of moves to consider
             transposition_table: Cache of searched positions
             move_scores: Dictionary of move scores for move ordering
             mcts_prior_map: optional dictionary of MCTS priors for move ordering
@@ -182,6 +251,16 @@ class ParallelMinimax:
         Returns:
             (best_value, principal_variation)
         """
+        # Get dynamic k for root node
+        dynamic_k = self.get_dynamic_k(
+            depth=depth,
+            max_depth=depth,  # At root, current depth is max depth
+            move_scores=move_scores,
+            legal_actions=env.legal_actions,
+            mcts_prior_map=mcts_prior_map,
+            pos_hash=env.zobrist_hash()
+        )
+        k_best = min(k_best, dynamic_k)  # Use the smaller of the two
         
         # Create search windows
         window_size = 0.2
@@ -319,19 +398,18 @@ class ParallelMinimax:
     ) -> Tuple[float, List[int]]:
         """
         Alpha-beta search that returns principal variation.
-        
-        Now integrates MCTS priors into the move ordering if provided.
+        Now uses dynamic k-best selection at each node.
         
         Args:
             env: Board game environment
             eval_func: Position evaluation function
             depth: Current search depth
-            k_best: Number of best moves to consider
+            k_best: Maximum number of moves to consider
             alpha: Lower bound
             beta: Upper bound
             transposition_table: Cache of searched positions
             move_scores: Dictionary of move scores for move ordering
-            mcts_prior_map: Dictionary of MCTS priors for move ordering (if available)
+            mcts_prior_map: Dictionary of MCTS priors for move ordering
             
         Returns:
             (position_value, principal_variation)
@@ -365,28 +443,30 @@ class ParallelMinimax:
         best_value = float('-inf') if maximizing else float('inf')
         best_pv = []
 
-        # ----- NEW: Incorporate MCTS priors into move ordering -----
-        # We'll combine MCTS prior and move_scores into one "combined_score".
-        # If no mcts_prior_map is given, we fallback to just move_scores.
+        # Get dynamic k for this node
+        dynamic_k = self.get_dynamic_k(
+            depth=depth,
+            max_depth=k_best,  # Use k_best as max_depth since it's our upper bound
+            move_scores=move_scores,
+            legal_actions=env.legal_actions,
+            mcts_prior_map=mcts_prior_map,
+            pos_hash=pos_hash
+        )
+        k_best = min(k_best, dynamic_k)
+
+        # Score and sort moves
         scored_moves = []
         for action in legal_actions:
-            prior_val = 0.0
-            if mcts_prior_map is not None:
-                prior_val = mcts_prior_map.get((pos_hash, action), 0.0)
-            
-            # Combine with old move_scores however you like:
-            # For example, we can do a simple weighted sum:
-            #  combined_score = 0.7 * prior_val + 0.3 * move_scores[action]
-            # Or tune these weights as you see fit.
+            # Combine MCTS prior and move scores
+            prior_val = mcts_prior_map.get((pos_hash, action), 0.0) if mcts_prior_map else 0.0
             move_score = move_scores.get(action, 0.0)
             combined_score = 0.7 * prior_val + 0.3 * move_score
-            
             scored_moves.append((action, combined_score))
-        
-        # Sort by combined score descending if maximizing, ascending if not
+            
+        # Sort by combined score
         scored_moves.sort(key=lambda x: x[1], reverse=maximizing)
         
-        # Slice top k
+        # Only consider top k moves
         ordered_moves = scored_moves[:k_best]
 
         # Alpha-beta over the ordered moves
@@ -398,7 +478,7 @@ class ParallelMinimax:
                 next_env,
                 eval_func,
                 depth - 1,
-                k_best,
+                k_best,  # Pass along current k_best as upper bound
                 -beta,
                 -alpha,
                 transposition_table,
@@ -471,3 +551,103 @@ class ParallelMinimax:
         
         # Clear processed leaves
         window.collected_leaves.clear()
+
+def minimax(
+    env: BoardGameEnv,
+    eval_func: Callable[[np.ndarray, bool], Tuple[Iterable[np.ndarray], Iterable[float]]],
+    depth: int,
+    k_best: int = None,
+    transposition_table: Optional[Dict] = None,
+    alpha: float = float('-inf'),
+    beta: float = float('inf'),
+) -> float:
+    """
+    Performs a depth-limited minimax search with alpha-beta pruning, move ordering, and transposition tables.
+
+    Args:
+        env: The game environment.
+        eval_func: Evaluation function that returns action probabilities and predicted values.
+        depth: The maximum depth to search.
+        k_best: Number of best moves to consider at each depth.
+        transposition_table: Table to store and retrieve previously computed states.
+        alpha: The alpha value for alpha-beta pruning.
+        beta: The beta value for alpha-beta pruning.
+
+    Returns:
+        The best evaluation value found within the given depth constraints.
+    """
+    if depth == 0 or env.is_game_over():
+        obs = env.observation()
+        _, value = eval_func(obs, False)
+        assert isinstance(value, float), f"Expected scalar, got {type(value)}"
+        return value
+
+    zobrist_hash = env.zobrist_hash()
+    if transposition_table is not None:
+        tt_entry = transposition_table.lookup(zobrist_hash)
+        if tt_entry is not None:
+            stored_depth, stored_value, stored_flag = tt_entry
+            if stored_depth >= depth:
+                if stored_flag == NodeType.EXACT:
+                    return stored_value
+                elif stored_flag == NodeType.LOWERBOUND:
+                    alpha = max(alpha, stored_value)
+                elif stored_flag == NodeType.UPPERBOUND:
+                    beta = min(beta, stored_value)
+                if alpha >= beta:
+                    return stored_value
+
+    legal_actions = np.where(env.legal_actions == 1)[0]
+
+    # Move ordering based on evaluation scores
+    move_scores = []
+    for action in legal_actions:
+        sim_env = copy.deepcopy(env)
+        sim_env.step(action)
+        obs = sim_env.observation()
+        _, value = eval_func(obs, False)
+        move_scores.append((action, value))
+
+    # Sort moves by value (descending for maximizing player, ascending for minimizing)
+    maximizing_player = env.to_play
+    move_scores.sort(key=lambda x: x[1], reverse=maximizing_player)
+
+    if k_best is not None:
+        move_scores = move_scores[:k_best]
+
+    best_value = float('-inf') if maximizing_player else float('inf')
+
+    for action, _ in move_scores:
+        sim_env = copy.deepcopy(env)
+        sim_env.step(action)
+        child_value = minimax(
+            sim_env,
+            eval_func,
+            depth - 1,
+            k_best,
+            transposition_table,
+            alpha,
+            beta
+        )
+
+        if maximizing_player:
+            best_value = max(best_value, child_value)
+            alpha = max(alpha, best_value)
+        else:
+            best_value = min(best_value, child_value)
+            beta = min(beta, best_value)
+
+        if beta <= alpha:
+            break
+
+    # Store the result in the transposition table
+    if transposition_table is not None:
+        if best_value <= alpha:
+            flag = NodeType.UPPERBOUND
+        elif best_value >= beta:
+            flag = NodeType.LOWERBOUND
+        else:
+            flag = NodeType.EXACT
+        transposition_table.store(zobrist_hash, depth, best_value, flag)
+
+    return best_value

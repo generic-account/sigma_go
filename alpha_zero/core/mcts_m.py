@@ -51,15 +51,11 @@ import logging
 from typing import Callable, Tuple, Mapping, Iterable, Any, Dict
 
 from alpha_zero.core.transposition_table import TranspositionTable, NodeType
-from alpha_zero.core.minimax import ParallelMinimax
+from alpha_zero.core.minimax import ParallelMinimax, minimax
 from alpha_zero.envs.base import BoardGameEnv
+from alpha_zero.envs import go_engine as go
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,  # Change to logging.DEBUG for even more details
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
 logger = logging.getLogger(__name__)
 
 
@@ -103,7 +99,14 @@ class Node:
         self.child_P = np.zeros(num_actions, dtype=np.float32)
 
         self.children: Mapping[int, 'Node'] = {}
-
+        
+        # Track which moves have been considered for expansion
+        self.considered_moves = set()
+        
+        # Parameters for progressive widening
+        self.alpha = 0.25  # Controls growth rate of number of children
+        self.C = 4  # Base number of children to consider
+        
         # For parallel MCTS: how many virtual losses have been applied on this node
         self.losses_applied = 0
 
@@ -140,10 +143,108 @@ class Node:
         """Check if the node has a parent (i.e. is not the root)."""
         return isinstance(self.parent, Node)
 
+    def get_expansion_count(self) -> int:
+        """Calculate number of moves that should be considered based on visit count."""
+        if self.N == 0:
+            return self.C
+        return min(
+            self.num_actions,
+            max(self.C, int(self.C * np.power(self.N, self.alpha)))
+        )
+
+    def get_next_moves_to_expand(self, legal_actions: np.ndarray) -> np.ndarray:
+        """Get the next set of moves to consider for expansion.
+        
+        Args:
+            legal_actions: Boolean mask of legal moves
+            
+        Returns:
+            Array of move indices to consider expanding
+        """
+        # Get number of moves we should consider at current visit count
+        target_count = self.get_expansion_count()
+        
+        # If we've already considered enough moves, return empty array
+        if len(self.considered_moves) >= target_count:
+            return np.array([], dtype=np.int32)
+            
+        # Get scores for unexpanded moves
+        unexpanded_moves = []
+        unexpanded_scores = []
+        
+        for move in range(self.num_actions):
+            if legal_actions[move] and move not in self.considered_moves:
+                unexpanded_moves.append(move)
+                # Score = prior probability + small random noise for tie-breaking
+                unexpanded_scores.append(self.child_P[move] + np.random.uniform(0, 1e-6))
+                
+        if not unexpanded_moves:
+            return np.array([], dtype=np.int32)
+            
+        # Sort by score and select top moves up to target_count
+        moves_array = np.array(unexpanded_moves)
+        scores_array = np.array(unexpanded_scores)
+        sorted_indices = np.argsort(-scores_array)  # Descending order
+        
+        num_new = min(
+            target_count - len(self.considered_moves),
+            len(unexpanded_moves)
+        )
+        
+        selected_moves = moves_array[sorted_indices[:num_new]]
+        self.considered_moves.update(selected_moves)
+        
+        return selected_moves
+
     def child_U(self, c_puct_base: float, c_puct_init: float) -> np.ndarray:
-        """Compute the U = c_puct * P * sqrt(sum(N)) / (1 + N_a) term for each child."""
+        """Compute UCB score with variance-aware exploration bonus.
+        
+        This implementation uses:
+        1. Running variance of Q-values to estimate uncertainty
+        2. Visit-count based uncertainty
+        3. Progressive widening to control exploration
+        4. Uncertainty bonus that scales with tree depth
+        """
+        # Base PUCT formula component
         pb_c = math.log((1 + self.N + c_puct_base) / c_puct_base) + c_puct_init
-        return pb_c * self.child_P * (math.sqrt(self.N) / (1 + self.child_N))
+        
+        # Calculate empirical variance of Q-values
+        # We use the squared difference from parent's Q-value as a proxy for variance
+        parent_q = self.Q if self.has_parent else 0.0
+        child_q = self.child_Q()
+        value_var = np.square(child_q - parent_q)
+        
+        # Calculate visit-count based uncertainty
+        # Less visited nodes have higher uncertainty
+        visit_uncertainty = 1.0 / np.sqrt(1 + self.child_N)
+        
+        # Progressive widening factor
+        # Reduces exploration as we get more visits
+        prog_width = np.power(self.N + 1, -0.25)
+        
+        # Depth-based scaling of uncertainty
+        # Deeper nodes get less uncertainty bonus
+        depth_scale = math.exp(-self.depth / 20.0)
+        
+        # Combine different uncertainty measures
+        total_uncertainty = (
+            0.5 * value_var +  # Value variance component
+            0.3 * visit_uncertainty +  # Visit count component
+            0.2 * self.child_P  # Prior probability component
+        )
+        
+        # Scale uncertainty by progressive widening and depth
+        uncertainty_bonus = total_uncertainty * prog_width * depth_scale
+        
+        # Final UCB formula combines:
+        # 1. Standard PUCT term
+        # 2. Enhanced uncertainty bonus
+        # 3. Mask for moves not yet considered (progressive widening)
+        considered_mask = np.array([i in self.considered_moves for i in range(self.num_actions)], dtype=np.float32)
+        return considered_mask * (
+            pb_c * self.child_P * (math.sqrt(self.N) / (1 + self.child_N)) +  # Standard PUCT
+            c_puct_init * uncertainty_bonus  # Uncertainty bonus
+        )
 
     def child_Q(self) -> np.ndarray:
         """Compute Q for each child as W_a / N_a."""
@@ -201,9 +302,18 @@ def expand(
     node: Node,
     prior_prob: np.ndarray,
     env_hash: int,
-    mcts_prior_map: Dict[Tuple[int, int], float]
+    mcts_prior_map: Dict[Tuple[int, int], float],
+    legal_actions: np.ndarray
 ) -> None:
-    """Expand a leaf node: assign child prior probabilities and mark is_expanded=True."""
+    """Expand a leaf node with selective expansion using progressive widening.
+    
+    Args:
+        node: Node to expand
+        prior_prob: Prior probabilities for all moves
+        env_hash: Hash of current environment state
+        mcts_prior_map: Map of (hash, action) -> prior for move ordering
+        legal_actions: Boolean mask of legal moves
+    """
     if node.is_expanded:
         raise RuntimeError('Node is already expanded.')
 
@@ -214,58 +324,306 @@ def expand(
     ):
         raise ValueError("prior_prob must be a 1D float array.")
 
+    # Store full prior probabilities
     node.child_P = prior_prob
+    
+    # Get initial set of moves to consider
+    moves_to_expand = node.get_next_moves_to_expand(legal_actions)
+    
+    # Store priors in mcts_prior_map for Minimax ordering
+    # Only store for moves we're actually considering
+    for move in moves_to_expand:
+        if prior_prob[move] > 0:
+            mcts_prior_map[(env_hash, move)] = float(prior_prob[move])
+
     node.is_expanded = True
 
-    # Store priors in mcts_prior_map for Minimax ordering
-    for action, p in enumerate(prior_prob):
-        if p > 0:
-            mcts_prior_map[(env_hash, action)] = float(p)
-
     logger.info(
-        f"expand: Expanded node at depth={node.depth}, assigned priors for {len(prior_prob)} actions."
+        f"expand: Expanded node at depth={node.depth}, "
+        f"considering {len(moves_to_expand)}/{len(prior_prob)} moves initially"
     )
 
 
 def confidence_weighted_value(mcts_value: float, minimax_value: float) -> float:
-    """Combine MCTS vs. Minimax values via a confidence-based approach."""
+    """Combine MCTS vs. Minimax values using adaptive sigmoid-based blending.
+    
+    The blending weight is determined by:
+    1. The difference between MCTS and Minimax evaluations
+    2. The absolute values of the evaluations (extreme values are more reliable)
+    3. A sigmoid function to smoothly transition between weights
+    4. The relative confidence of each evaluation method
+    
+    Args:
+        mcts_value: Value from MCTS evaluation (-1 to 1)
+        minimax_value: Value from Minimax search (-1 to 1)
+        
+    Returns:
+        Weighted combination of the two values
+    """
+    # Calculate absolute difference between evaluations
     diff = abs(mcts_value - minimax_value)
+    
+    # Calculate confidence factors based on absolute values
+    # Values closer to -1 or 1 are considered more reliable
+    mcts_conf = 1.0 / (1.0 + np.exp(-5 * (abs(mcts_value) - 0.5)))  # Sigmoid centered at 0.5
+    minimax_conf = 1.0 / (1.0 + np.exp(-5 * (abs(minimax_value) - 0.5)))
+    
+    # Base alpha starts at 0.5 and adjusted by confidence difference
+    base_alpha = 0.5 + 0.3 * (mcts_conf - minimax_conf)
+    
+    # Agreement factor - how much the evaluations agree/disagree
+    # Centered at diff=0.3, steeper slope for faster transition
+    agreement_factor = 1.0 / (1.0 + np.exp(8 * (diff - 0.3)))
+    
+    # Final alpha combines base confidence with agreement
+    # When evaluations agree (high agreement_factor), use confidence-based weighting
+    # When they disagree (low agreement_factor), bias towards the more confident evaluation
+    alpha = base_alpha * agreement_factor + (0.5 + 0.3 * np.sign(mcts_conf - minimax_conf)) * (1 - agreement_factor)
+    
+    # Ensure alpha stays in [0.2, 0.8] range to maintain influence from both sources
+    alpha = min(0.8, max(0.2, alpha))
+    
+    return alpha * mcts_value + (1 - alpha) * minimax_value
 
-    # Example simple approach:
-    if diff < 0.2:
-        # Weighted more towards MCTS if they're close
-        alpha = 0.7
-    else:
-        # Weighted more towards Minimax if they disagree significantly
-        alpha = 0.3
 
-    combined = alpha * mcts_value + (1 - alpha) * minimax_value
-    logger.info(
-        f"confidence_weighted_value: MCTS={mcts_value:.3f}, Minimax={minimax_value:.3f}, "
-        f"Diff={diff:.3f}, alpha={alpha:.2f}, Combined={combined:.3f}"
-    )
-    return combined
+def compute_power_mean(values: np.ndarray, p: float = 2.0) -> float:
+    """Compute the power mean (generalized mean) of a set of values.
+    
+    The power mean with exponent p is defined as:
+    M_p(x) = (1/n * sum(x_i^p))^(1/p)
+    
+    Special cases:
+    p = 1: arithmetic mean
+    p = 2: quadratic mean
+    p → ∞: maximum
+    p → -∞: minimum
+    
+    Args:
+        values: Array of values to compute mean over
+        p: Power parameter (default 2.0 for quadratic mean)
+        
+    Returns:
+        Power mean value
+    """
+    if len(values) == 0:
+        return 0.0
+    
+    # Handle extreme p values for numerical stability
+    if p > 100:  # Approximate max
+        return np.max(values)
+    elif p < -100:  # Approximate min
+        return np.min(values)
+        
+    # Standard power mean calculation
+    return np.power(np.mean(np.power(np.abs(values), p)), 1.0/p) * np.sign(np.mean(values))
+
+
+def get_implicit_minimax_value(node: Node, to_play: int) -> float:
+    """Calculate implicit minimax value for a node based on visit counts and Q-values.
+    
+    This implements the implicit minimax backup strategy from the paper:
+    "Monte Carlo Tree Search with Implicit Minimax Backups"
+    
+    The key idea is to weight child values based on their visit counts,
+    but use power means to approximate min/max operations.
+    
+    Args:
+        node: The node to compute implicit minimax value for
+        to_play: Current player (used to determine min vs max)
+        
+    Returns:
+        Implicit minimax value for the node
+    """
+    if not node.is_expanded or node.N == 0:
+        return node.Q
+        
+    # Get Q-values and visit counts for all children
+    child_Q = node.child_Q()
+    child_N = node.child_N
+    
+    # Filter to only visited children
+    mask = child_N > 0
+    if not np.any(mask):
+        return node.Q
+        
+    values = child_Q[mask]
+    visits = child_N[mask]
+    
+    # Weight values by visit counts
+    weights = visits / np.sum(visits)
+    weighted_values = values * weights
+    
+    # Use appropriate power mean based on player
+    # Positive power for maximizing player, negative for minimizing
+    p = 4.0 if to_play else -4.0
+    
+    return compute_power_mean(weighted_values, p)
+
+
+def get_max_child_value(node: Node, to_play: int) -> float:
+    """Get the maximum/minimum child value based on player perspective.
+    
+    For max player, returns maximum child value.
+    For min player, returns minimum child value.
+    
+    Args:
+        node: Current node
+        to_play: Current player (used to determine max vs min)
+        
+    Returns:
+        Maximum/minimum child Q-value
+    """
+    if not node.is_expanded or node.N == 0:
+        return node.Q
+        
+    child_Q = node.child_Q()
+    child_N = node.child_N
+    
+    # Only consider visited children
+    mask = child_N > 0
+    if not np.any(mask):
+        return node.Q
+        
+    values = child_Q[mask]
+    
+    # For max player, return maximum value
+    # For min player, return minimum value
+    return np.max(values) if to_play else np.min(values)
+
+
+def is_critical_position(
+    node: Node,
+    mcts_value: float,
+    minimax_value: float,
+    critical_threshold: float = 0.7
+) -> bool:
+    """Determine if a position is critical and warrants maximum backpropagation.
+    
+    A position is considered critical if:
+    1. It has extreme evaluation (near win/loss)
+    2. There's large disagreement between MCTS and minimax
+    3. It shows sharp changes in evaluation
+    4. It's part of a forcing sequence
+    
+    Args:
+        node: Current node
+        mcts_value: MCTS evaluation
+        minimax_value: Minimax evaluation
+        critical_threshold: Threshold for considering position critical
+        
+    Returns:
+        Boolean indicating if position is critical
+    """
+    # Check for extreme evaluations
+    if abs(mcts_value) > critical_threshold or abs(minimax_value) > critical_threshold:
+        return True
+        
+    # Check for large evaluation disagreement
+    if abs(mcts_value - minimax_value) > 0.5:
+        return True
+        
+    # Check for sharp evaluation changes from parent
+    if node.has_parent and node.parent.N > 0:
+        parent_eval = node.parent.Q
+        eval_change = abs(mcts_value - (-parent_eval))
+        if eval_change > 0.5:
+            return True
+            
+    # Check for forcing sequences (low branching factor)
+    if node.is_expanded:
+        legal_moves = np.sum(node.child_N > 0)
+        if legal_moves <= 3:  # Small number of viable moves suggests forcing sequence
+            return True
+            
+    return False
 
 
 def backup(node: Node, mcts_value: float, minimax_value: float) -> None:
-    """Backpropagates results up the tree from a leaf to the root."""
-    combined_value = confidence_weighted_value(mcts_value, minimax_value)
-    original_combined = combined_value
-
-    logger.info(
-        f"backup: Starting from leaf at depth={node.depth}, MCTS={mcts_value:.3f}, "
-        f"Minimax={minimax_value:.3f}, Combined={original_combined:.3f}"
-    )
-
+    """Enhanced backpropagation using maximum propagation for critical positions.
+    
+    This implementation combines:
+    1. Traditional MCTS averaging
+    2. Maximum backpropagation for critical positions
+    3. Implicit minimax through power means
+    4. Explicit minimax values from search
+    
+    The backup strategy adapts based on:
+    - Position criticality (use max backup for critical positions)
+    - Node depth (deeper nodes prefer max backup)
+    - Evaluation extremity (extreme values propagate more directly)
+    - Move forcing (forcing sequences use max backup)
+    
+    Args:
+        node: Current node to backup from
+        mcts_value: Value from MCTS evaluation
+        minimax_value: Value from explicit minimax search
+    """
+    # Start with confidence-weighted combination of MCTS and explicit minimax
+    explicit_combined = confidence_weighted_value(mcts_value, minimax_value)
+    
     while isinstance(node, Node):
+        # Get implicit minimax value through power means
+        implicit_value = get_implicit_minimax_value(node, node.to_play)
+        
+        # Get maximum child value for critical positions
+        max_value = get_max_child_value(node, node.to_play)
+        
+        # Determine if position is critical
+        is_critical = is_critical_position(node, mcts_value, minimax_value)
+        
+        # Compute adaptive mixing factors
+        visit_factor = min(1.0, node.N / 100.0)
+        depth_factor = min(1.0, node.depth / 10.0)
+        
+        # Calculate value volatility
+        volatility = 0.0
+        if node.has_parent:
+            sibling_values = []
+            for child in node.parent.children.values():
+                if child.N > 0:
+                    sibling_values.append(child.Q)
+            if sibling_values:
+                volatility = np.std(sibling_values)
+        
+        # Critical positions get higher weight for max_value
+        max_weight = 0.0
+        if is_critical:
+            # Base weight for critical positions
+            max_weight = 0.4
+            # Increase weight based on factors
+            max_weight += 0.2 * depth_factor  # Deeper nodes
+            max_weight += 0.2 * volatility    # Higher volatility
+            max_weight += 0.2 * visit_factor  # More visited nodes
+            max_weight = min(0.8, max_weight)
+        
+        # Remaining weight split between implicit and explicit values
+        remaining_weight = 1.0 - max_weight
+        implicit_ratio = 0.4 * visit_factor + 0.4 * volatility + 0.2 * depth_factor
+        implicit_ratio = min(0.8, max(0.2, implicit_ratio))
+        
+        # Combine all three value sources
+        combined_value = (
+            max_weight * max_value +
+            remaining_weight * (
+                implicit_ratio * implicit_value +
+                (1 - implicit_ratio) * explicit_combined
+            )
+        )
+        
+        # Update node statistics
         node.N += 1
         node.W += combined_value
+        
         logger.info(
-            f"backup: Node depth={node.depth}, updated N={node.N}, W={node.W:.3f} "
-            f"(combined_value={combined_value:.3f})"
+            f"backup: Node depth={node.depth}, N={node.N}, "
+            f"explicit={explicit_combined:.3f}, implicit={implicit_value:.3f}, "
+            f"max={max_value:.3f}, combined={combined_value:.3f} "
+            f"(max_weight={max_weight:.2f}, is_critical={is_critical})"
         )
+        
+        # Prepare for parent node
         node = node.parent
-        combined_value = -combined_value  # flip sign for the parent
+        explicit_combined = -explicit_combined  # Flip sign for opponent's perspective
 
 
 def add_dirichlet_noise(node: Node, legal_actions: np.ndarray, eps: float = 0.25, alpha: float = 0.03) -> None:
@@ -323,6 +681,69 @@ def revert_virtual_loss(node: Node) -> None:
         node = node.parent
 
 
+def log_timing(start_time, message, move=None):
+    """Helper function to log timing information."""
+    elapsed = time.perf_counter() - start_time
+    if move is not None:
+        logger.info(f"Move {move} completed in {elapsed:.2f} seconds")
+    else:
+        logger.info(f"{message}: {elapsed:.2f} seconds")
+
+
+def is_tactical_position(
+    node: Node,
+    env: BoardGameEnv,
+    mcts_value: float,
+    visit_threshold: int = 50,
+) -> bool:
+    """Determine if a position is tactical and requires minimax analysis.
+    
+    A position is considered tactical if:
+    1. It has low visit counts (indicating uncertainty)
+    2. It has high value volatility among siblings
+    3. It involves captures or threats
+    4. There are sharp evaluation changes
+    """
+    # Skip if node has too many visits (well-explored)
+    if node.N > visit_threshold:
+        return False
+        
+    # Check for value volatility among siblings
+    if node.has_parent:
+        sibling_values = node.parent.child_Q()
+        value_std = np.std(sibling_values[sibling_values != 0])
+        if value_std > 0.3:  # High volatility threshold
+            return True
+            
+    # Check for captures or material imbalance in Go
+    if hasattr(env, 'position') and hasattr(env.position, 'board'):
+        # For Go: Check if there are groups with few liberties
+        for y in range(env.position.board.shape[0]):
+            for x in range(env.position.board.shape[1]):
+                if env.position.board[y,x] != go.EMPTY:
+                    # Get neighbors of this stone
+                    neighbors = [
+                        (y-1, x), (y+1, x),
+                        (y, x-1), (y, x+1)
+                    ]
+                    # Count empty neighbor positions (liberties)
+                    liberty_count = 0
+                    for ny, nx in neighbors:
+                        if (0 <= ny < env.position.board.shape[0] and 
+                            0 <= nx < env.position.board.shape[1] and
+                            env.position.board[ny,nx] == go.EMPTY):
+                            liberty_count += 1
+                    
+                    if 1 <= liberty_count <= 2:  # Stone in atari or near atari
+                        return True
+                
+    # Check for sharp evaluation changes
+    if node.has_parent and abs(node.Q - node.parent.Q) > 0.5:
+        return True
+        
+    return False
+
+
 def hybrid_uct_search(
     env: BoardGameEnv,
     eval_func: Callable[[np.ndarray, bool], Tuple[Iterable[np.ndarray], Iterable[float]]],
@@ -335,175 +756,145 @@ def hybrid_uct_search(
     max_depth: int,
     num_minimax_threads: int = 4,
     minimax_time_limit: float = 30.0,
-    max_minimax_leaves: int = 3,  # Only run Minimax on top X leaves
+    max_minimax_leaves: int = 3,
     root_noise: bool = False,
     warm_up: bool = False,
     deterministic: bool = False,
 ) -> Tuple[int, np.ndarray, float, float, Node]:
-    """Hybrid MCTS–Minimax search, with selective Minimax application and confidence weighting."""
-    if not isinstance(env, BoardGameEnv):
-        raise ValueError(f"Expect `env` to be a valid BoardGameEnv instance, got {env}")
-    if env.is_game_over():
-        raise RuntimeError("Game is already over.")
 
-    logger.info("hybrid_uct_search: Starting hybrid MCTS-Minimax search.")
+    # Initialize search statistics
+    search_stats = {
+        'total_time': 0.0,
+        'mcts_time': 0.0,
+        'minimax_time': 0.0,
+        'minimax_calls': 0,
+        'minimax_improvements': 0,
+        'critical_positions': 0,
+        'avg_eval_change': 0.0,
+        'max_eval_change': 0.0,
+        'tactical_positions': [],  # Track positions where minimax helped
+        'eval_improvements': []    # Track evaluation improvements
+    }
+
     start_time = time.perf_counter()
+
+    # Initialize transposition table and MCTS prior map
+    transposition_table = TranspositionTable()
+    mcts_prior_map = {}
 
     # Initialize parallel minimax searcher
     parallel_minimax = ParallelMinimax(
         num_threads=num_minimax_threads,
-        min_batch_size=16,
-        max_batch_size=128,
-        virtual_loss=0.1,
-        time_limit=minimax_time_limit
+        time_limit=minimax_time_limit,
+        base_k=k_best,
+        min_k=3,
+        max_k=20,
     )
 
-    # Create or load a transposition table
-    transposition_table = TranspositionTable()
-
-    # A map of (zobrist_hash, action) -> prior for better move ordering in Minimax
-    mcts_prior_map: Dict[Tuple[int, int], float] = {}
-
-    # If we have no root node, build one
+    # Create root node if needed
     if root_node is None:
-        logger.info("hybrid_uct_search: Creating new root node.")
-        prior_prob, init_value = eval_func(env.observation(), False)
-        root_node = Node(
-            to_play=env.to_play,
-            num_actions=env.action_dim,
-            parent=DummyNode()
-        )
-        expand(root_node, prior_prob, env.hash(), mcts_prior_map)
-        backup(root_node, init_value, init_value)
+        prior_prob, value = eval_func(env.observation(), False)
+        root_node = Node(to_play=env.to_play, num_actions=env.action_dim, parent=DummyNode())
+        expand(root_node, prior_prob, env.zobrist_hash(), mcts_prior_map, env.legal_actions)
+        backup(root_node, value, value)
 
     assert root_node.to_play == env.to_play
-
-    # Optionally add Dirichlet noise at the root for exploration
     root_legal_actions = env.legal_actions
+
     if root_noise:
         add_dirichlet_noise(root_node, root_legal_actions)
-        logger.info("hybrid_uct_search: Added Dirichlet noise to root node's prior.")
 
-    # ----------------------------
-    # Main MCTS Loop
-    # ----------------------------
-    logger.info(f"hybrid_uct_search: Starting main MCTS loop with up to {num_simulations} simulations.")
-    while root_node.N < num_simulations + num_parallel:
-        leaves = []
-        failsafe = 0
+    # Show initial board state
+    logger.info(f"\nCurrent board state:\n{env.position}")
 
-        # Collect up to num_parallel leaves for batch processing
-        while len(leaves) < num_parallel and failsafe < num_parallel * 2:
-            failsafe += 1
-            node = root_node
-            sim_env = copy.deepcopy(env)
-            done = sim_env.is_game_over()
+    # Main MCTS loop
+    while root_node.N < num_simulations:
+        node = root_node
+        sim_env = copy.deepcopy(env)
+        mcts_start = time.perf_counter()
 
-            # DESCENT: Follow best_child down until an unexpanded node or terminal
-            while node.is_expanded and not done:
-                node = best_child(node, sim_env.legal_actions, c_puct_base, c_puct_init, sim_env.opponent_player)
-                _, reward, done, _ = sim_env.step(node.move)
+        # Selection phase
+        while node.is_expanded and not sim_env.is_game_over():
+            node = best_child(node, sim_env.legal_actions, c_puct_base, c_puct_init, sim_env.opponent_player)
+            sim_env.step(node.move)
 
-            if done:
-                logger.info(f"MCTS selection: reached terminal state, reward={reward:.3f}.")
-                backup(node, -reward, -reward)
-                continue
+        # Store MCTS priors for move ordering
+        if node.parent is not None:
+            mcts_prior_map[(sim_env.zobrist_hash(), node.move)] = node.parent.child_P[node.move]
 
-            # Not terminal, so we have a leaf
-            add_virtual_loss(node)
-            leaves.append((node, sim_env.observation()))
+        # Get MCTS evaluation
+        prior_prob, mcts_value = eval_func(sim_env.observation(), False)
 
-        # EVALUATION PHASE
-        if leaves:
-            # Evaluate all leaves in one batch with the neural net
-            batched_nodes, batched_obs = map(list, zip(*leaves))
-            prior_probs, mcts_values = eval_func(np.stack(batched_obs, axis=0), True)
-
-            logger.info(f"hybrid_uct_search: Collected {len(leaves)} leaves, evaluating with NN, then Minimax on top {max_minimax_leaves}.")
-
-            # Sort leaves by some priority measure (example: absolute MCTS value, plus a small depth bonus)
-            leaf_indices = list(range(len(batched_nodes)))
-            leaf_indices.sort(
-                key=lambda i: (
-                    abs(mcts_values[i])
-                    + 0.2 * (1.0 - batched_nodes[i].depth / 30)  # example depth factor
-                ),
-                reverse=True
+        # Check if position is tactical
+        is_tactical = is_tactical_position(node, sim_env, mcts_value)
+        if is_tactical:
+            search_stats['critical_positions'] += 1
+            minimax_start = time.perf_counter()
+            
+            # Show board state for tactical positions
+            logger.info(f"\nAnalyzing tactical position at depth {node.depth}:")
+            logger.info(f"{sim_env.position}")
+            
+            # Run parallel minimax search
+            minimax_value, pv = parallel_minimax.iterative_deepening_search(
+                sim_env,
+                eval_func,
+                max_depth,
+                k_best,
+                transposition_table,
+                mcts_prior_map
             )
-            top_leaf_indices = leaf_indices[:max_minimax_leaves]
+            
+            search_stats['minimax_time'] += time.perf_counter() - minimax_start
+            search_stats['minimax_calls'] += 1
+            
+            # Track evaluation changes
+            eval_diff = abs(minimax_value - mcts_value)
+            search_stats['avg_eval_change'] = (search_stats['avg_eval_change'] * (search_stats['minimax_calls'] - 1) + eval_diff) / search_stats['minimax_calls']
+            search_stats['max_eval_change'] = max(search_stats['max_eval_change'], eval_diff)
+            
+            if eval_diff > 0.3:
+                search_stats['minimax_improvements'] += 1
+                search_stats['tactical_positions'].append({
+                    'depth': node.depth,
+                    'mcts_value': mcts_value,
+                    'minimax_value': minimax_value,
+                    'eval_diff': eval_diff,
+                    'pv_length': len(pv)  # Track principal variation length
+                })
+                search_stats['eval_improvements'].append(eval_diff)
+            
+            # Only expand if not already expanded
+            if not node.is_expanded:
+                expand(node, prior_prob, sim_env.zobrist_hash(), mcts_prior_map, sim_env.legal_actions)
+            backup(node, mcts_value, minimax_value)
+        else:
+            # Only expand if not already expanded
+            if not node.is_expanded:
+                expand(node, prior_prob, sim_env.zobrist_hash(), mcts_prior_map, sim_env.legal_actions)
+            backup(node, mcts_value, mcts_value)
 
-            # Build environments for top leaves
-            minimax_envs = []
-            for idx in top_leaf_indices:
-                node_i = batched_nodes[idx]
-                sim_env = copy.deepcopy(env)
+        search_stats['mcts_time'] += time.perf_counter() - mcts_start
 
-                # Replay moves from root to node_i
-                path = []
-                cur = node_i
-                while cur.has_parent:
-                    path.append(cur.move)
-                    cur = cur.parent
-                for move in reversed(path):
-                    sim_env.step(move)
+        # Show progress every 100 simulations with current board
+        if root_node.N % 100 == 0:
+            logger.info(f"\nProgress: {root_node.N}/{num_simulations} simulations")
+            logger.info(f"Current board state:\n{env.position}")
 
-                minimax_envs.append((idx, sim_env))
-
-            # Run Minimax on top leaves
-            minimax_results = {}
-            for (idx, sim_env) in minimax_envs:
-                val, _ = parallel_minimax.iterative_deepening_search(
-                    sim_env,
-                    eval_func,
-                    max_depth,
-                    k_best,
-                    transposition_table,
-                    mcts_prior_map  # pass the MCTS priors
-                )
-                minimax_results[idx] = val
-                logger.info(f"Minimax: Leaf index={idx}, depth={batched_nodes[idx].depth}, Minimax value={val:.3f}")
-
-            # BACKUP for each leaf
-            for i, (leaf_node, prior_prob, mcts_val) in enumerate(zip(batched_nodes, prior_probs, mcts_values)):
-                revert_virtual_loss(leaf_node)
-
-                # Expand if not expanded
-                if not leaf_node.is_expanded:
-                    expand(leaf_node, prior_prob, env.hash(), mcts_prior_map)
-
-                # Combine MCTS & Minimax or fallback if not in top
-                if i in minimax_results:
-                    backup(leaf_node, mcts_val, minimax_results[i])
-                else:
-                    # If we didn't run Minimax, back up MCTS alone or do a simpler fallback
-                    backup(leaf_node, mcts_val, mcts_val)
-
-    # -----------------------------------------
-    # Move Selection
-    # -----------------------------------------
-    logger.info("hybrid_uct_search: MCTS complete, selecting move from root_node.")
-    search_pi = generate_search_policy(
-        root_node.child_N,
-        1.0 if warm_up else 0.1,
-        root_legal_actions
-    )
-
+    # Move selection
+    search_pi = generate_search_policy(root_node.child_N, 1.0 if warm_up else 0.1, root_legal_actions)
     move = None
     next_root_node = None
     best_child_Q = 0.0
 
     if deterministic:
         move = np.argmax(root_node.child_N)
-        logger.info(f"Move Selection: Deterministic, chose move={move} with max visits.")
     else:
-        # Sample from the search distribution
         while move is None or (warm_up and env.has_pass_move and move == env.pass_move) or root_legal_actions[move] != 1:
             move = np.random.choice(np.arange(search_pi.shape[0]), p=search_pi)
-        logger.info(f"Move Selection: Sampled move={move} from search_pi distribution.")
 
     if move in root_node.children:
         next_root_node = root_node.children[move]
-        # Keep stats for the new root
         N, W = copy.copy(next_root_node.N), copy.copy(next_root_node.W)
         next_root_node.parent = DummyNode()
         next_root_node.move = None
@@ -511,7 +902,50 @@ def hybrid_uct_search(
         next_root_node.W = W
         best_child_Q = -next_root_node.Q
 
-    end_time = time.perf_counter()
-    logger.info(f"hybrid_uct_search: Completed in {end_time - start_time:.2f}s. Final chosen move={move}.")
+    # Log final search statistics and analysis
+    search_stats['total_time'] = time.perf_counter() - start_time
+    logger.info("\nSearch completed:")
+    logger.info(f"Total time: {search_stats['total_time']:.2f}s")
+    logger.info(f"MCTS time: {search_stats['mcts_time']:.2f}s")
+    logger.info(f"Minimax time: {search_stats['minimax_time']:.2f}s")
+    logger.info(f"Critical positions: {search_stats['critical_positions']}")
+    
+    if search_stats['minimax_calls'] > 0:
+        logger.info(f"Minimax improvements: {search_stats['minimax_improvements']}/{search_stats['minimax_calls']}")
+        logger.info(f"Average eval change: {search_stats['avg_eval_change']:.3f}")
+        
+        # Additional analysis for improving minimax
+        logger.info("\nAnalysis:")
+        if search_stats['tactical_positions']:
+            avg_depth = sum(p['depth'] for p in search_stats['tactical_positions']) / len(search_stats['tactical_positions'])
+            logger.info(f"Average depth of tactical positions: {avg_depth:.1f}")
+            logger.info(f"Distribution of eval improvements: {np.percentile(search_stats['eval_improvements'], [25, 50, 75])}")
+            
+            # Analyze where minimax helped most
+            max_improvement_pos = max(search_stats['tactical_positions'], key=lambda x: x['eval_diff'])
+            logger.info(f"Largest improvement: {max_improvement_pos['eval_diff']:.3f} at depth {max_improvement_pos['depth']}")
+
+    logger.info(f"Selected move: {move} (Q-value: {best_child_Q:.3f})")
 
     return move, search_pi, root_node.Q, best_child_Q, next_root_node
+
+
+def count_group_liberties(env: BoardGameEnv) -> int:
+    """Count number of groups with 1-2 liberties to measure tactical complexity."""
+    if not hasattr(env, 'position') or not hasattr(env.position, 'board'):
+        return 0
+        
+    critical_groups = 0
+    for y in range(env.position.board.shape[0]):
+        for x in range(env.position.board.shape[1]):
+            if env.position.board[y,x] != go.EMPTY:
+                neighbors = [(y-1, x), (y+1, x), (y, x-1), (y, x+1)]
+                liberty_count = 0
+                for ny, nx in neighbors:
+                    if (0 <= ny < env.position.board.shape[0] and 
+                        0 <= nx < env.position.board.shape[1] and
+                        env.position.board[ny,nx] == go.EMPTY):
+                        liberty_count += 1
+                if 1 <= liberty_count <= 2:
+                    critical_groups += 1
+    return critical_groups

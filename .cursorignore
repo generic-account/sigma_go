@@ -1,0 +1,24 @@
+# Add directories or file patterns to ignore during indexing (e.g. foo/ or *.csv)
+
+# Mac/OSX
+.DS_Store
+
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+
+.vscode
+
+nohup.out
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+games
+
+# Uncode files/folders
+uncode
+
+# Ignore all .sgf files
+*.sgf

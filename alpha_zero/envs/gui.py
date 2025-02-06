@@ -692,7 +692,7 @@ class BoardGameGui:
         if self.black_player is not None and self.black_player == 'human':
             return 'Human'
         else:
-            return 'AlphaZero'
+            return 'SigmaGO'
 
     @property
     def white_player_name(self):

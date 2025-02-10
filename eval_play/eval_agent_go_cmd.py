@@ -209,16 +209,13 @@ def main():
     # Create players
     if FLAGS.human_vs_ai:
         black_player = 'human'
-        white_player = sigmago_player_builder(FLAGS.sigmago_ckpt, runtime_device)
-        white_player = wrap_player(white_player)
+        white_player = sigmago_player_builder(FLAGS.white_ckpt, runtime_device)
         white_name = "AlphaZero"
         black_name = "Human"
     else:
         # AI vs AI: SigmaGo (Black) vs AlphaZero (White)
-        black_player = sigmago_player_builder(FLAGS.sigmago_ckpt, runtime_device)
-        black_player = wrap_player(black_player)
-        white_player = alphazero_player_builder(FLAGS.alphazero_ckpt, runtime_device)
-        white_player = wrap_player(white_player)
+        black_player = sigmago_player_builder(FLAGS.black_ckpt, runtime_device)
+        white_player = alphazero_player_builder(FLAGS.white_ckpt, runtime_device)
         black_name = "SigmaGo"
         white_name = "AlphaZero"
 

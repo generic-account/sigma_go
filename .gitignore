@@ -17,3 +17,5 @@ nohup.out
 .venv
 
 9x9_matches
+
+.cursorignore

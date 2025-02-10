@@ -3,44 +3,52 @@
 # LICENSE file for details.
 
 
-"""A much faster MCTS implementation for AlphaZero.
+"""A much faster MCTS-Minimax hybrid implementation for AlphaZero.
 Where we use Numpy arrays to store node statistics,
-and create child node on demand.
+and create child nodes on demand.
 
+This implementation combines MCTS with minimax search to get the best of both approaches:
+- MCTS for selective tree expansion and exploration 
+- Minimax for tactical calculation and pruning
+- Transposition table for caching positions
+- Principal variation tracking
 
-This implementation is adapted from the Minigo project developed by Google.
-https://github.com/tensorflow/minigo
+The hybrid approach works by:
+1. Using MCTS to guide the high-level search and identify promising variations
+2. Switching to minimax search at leaf nodes to calculate tactical sequences
+3. Using a transposition table to cache and reuse search results
+4. Propagating minimax values back up through the MCTS tree
 
+The positions are evaluated from the current player's perspective.
 
+For example, in a two-player zero-sum game:
 
-The positions are evaluated from the current player (or to move) perspective.
+        A           Black to move (root)
+       / \
+      B   C         White to move
+     / \
+    D   E           Black to move
 
-        A           Black to move
+When evaluating positions:
+- Node A represents Black's turn to move
+- Nodes B,C represent positions after White's moves
+- Nodes D,E represent positions after Black's moves
 
-    B       C       White to move
+The evaluation scores are always from the perspective of the player to move.
+So when selecting the best child of node A:
 
-  D   E             Black to move
+1. If B has score 0.8 and C has score 0.3 (from White's perspective)
+2. We negate these scores to get Black's perspective: -0.8 and -0.3
+3. Black should choose C since max(-0.8, -0.3) = -0.3
 
-For example, in the above two-player, zero-sum games search tree. 'A' is the root node,
-and when the game is in state corresponding to node 'A', it's black's turn to move.
-However the children nodes of 'A' are evaluated from white player's perspective.
-So if we select the best child for node 'A', without further consideration,
-we'd be actually selecting the best child for white player, which is not what we want.
-
-Let's look at an simplified example where we don't consider number of visits and total values,
-just the raw evaluation scores, if the evaluated scores (from white's perspective)
-for 'B' and 'C' are 0.8 and 0.3 respectively. Then according to these results,
-the best child of 'A' max(0.8, 0.3) is 'B', however this is done from white player's perspective.
-But node 'A' represents black's turn to move, so we need to select the best child from black player's perspective,
-which should be 'C' - the worst move for white, thus a best move for black.
-
-One way to resolve this issue is to always switching the signs of the child node's Q values when we select the best child.
-
-For example:
+This is implemented by negating child Q-values during selection:
     ucb_scores = -node.child_Q() + node.child_U()
 
-In this case, a max(-0.8, -0.3) will give us the correct results for black player when we select the best child for node 'A'.
-
+The hybrid approach combines:
+- MCTS's ability to focus search on promising variations
+- Minimax's tactical strength and pruning
+- Efficient position caching via transposition table
+- Principal variation tracking for best line analysis
 """
 
 import copy
@@ -473,6 +481,26 @@ def generate_search_policy(child_N: np.ndarray, temperature: float, legal_action
     return pi_probs
 
 
+def log_timing(start_time, message, move=None):
+    """Helper function to log timing information."""
+    elapsed = time.perf_counter() - start_time
+    if move is not None:
+        logger.info(f"Move {move} completed in {elapsed:.2f} seconds")
+    else:
+        logger.info(f"{message}: {elapsed:.2f} seconds")
+
+def log_board_state(env, depth=None, is_tactical=False):
+    """Helper function to log the current board state with context."""
+    if depth is not None:
+        if is_tactical:
+            logger.info(f"\nAnalyzing tactical position at depth {depth}:")
+        else:
+            logger.info(f"\nPosition at depth {depth}:")
+    else:
+        logger.info("\nCurrent board state:")
+    logger.info(f"{env.position}")
+    logger.info(f"Current player: {env.to_play}")
+
 def uct_search(
     env: BoardGameEnv,
     eval_func: Callable[[np.ndarray, bool], Tuple[Iterable[np.ndarray], Iterable[float]]],
@@ -487,62 +515,26 @@ def uct_search(
     deterministic: bool = False,
     use_minimax: bool = False,
 ) -> Tuple[int, np.ndarray, float, float, Node]:
-    """Single-threaded Upper Confidence Bound (UCB) for Trees (UCT) search without any rollout.
-
-    It follows the following general UCT search algorithm, except here we don't do rollout.
-    ```
-    function UCTSEARCH(r,m)
-      i←1
-      for i ≤ m do
-          n ← select(r)
-          n ← expand(n)
-          ∆ ← rollout(n)
-          backup(n,∆)
-      end for
-      return end function
-    ```
-
-    Args:
-        env: a gym like custom BoardGameEnv environment.
-        eval_func: a evaluation function when called returns the
-            action probabilities and predicted value from
-            current player's perspective.
-        root_node: root node of the search tree, this comes from reuse sub-tree.
-        c_puct_base: a float constant determining the level of exploration.
-        c_puct_init: a float constant determining the level of exploration.
-        k_best: number of best moves to consider at each depth.
-        depth: depth limit for minimax search.
-        num_simulations: number of simulations to run, default 800.
-        root_noise: whether add dirichlet noise to root node to encourage exploration, default off.
-        warm_up: if true, use temperature 1.0 to generate play policy, other wise use 0.1, default off.
-        deterministic: after the MCTS search, choose the child node with most visits number to play in the game,
-            instead of sample through a probability distribution, default off.
-        use_minimax: whether use minimax algorithm to evaluate the leaf node, default off.
-
-    Returns:
-        tuple contains:
-            a integer indicate the sampled action to play in the environment.
-            a 1D numpy.array search policy action probabilities from the MCTS search result.
-            a float indicate the root node value
-            a float indicate the best child value
-            a Node instance represent subtree of this MCTS search, which can be used as next root node for MCTS search.
-
-    Raises:
-        ValueError:
-            if input argument `env` is not valid BoardGameEnv instance.
-            if input argument `num_simulations` is not a positive integer.
-        RuntimeError:
-            if the game is over.
-    """
-    if not isinstance(env, BoardGameEnv):
-        raise ValueError(f'Expect `env` to be a valid BoardGameEnv instance, got {env}')
-    if not 1 <= num_simulations:
-        raise ValueError(f'Expect `num_simulations` to a positive integer, got {num_simulations}')
-    if env.is_game_over():
-        raise RuntimeError('Game is over.')
 
     # Start time of the search
     start_time = time.perf_counter()
+    logger.info("Starting MCTS search...")
+
+    # Show initial board state using actual game environment
+    log_board_state(env)
+
+    # Initialize search statistics
+    search_stats = {
+        'total_time': 0.0,
+        'mcts_time': 0.0,
+        'minimax_time': 0.0,
+        'minimax_calls': 0,
+        'minimax_improvements': 0,
+        'avg_eval_change': 0.0,
+        'max_eval_change': 0.0,
+        'tactical_positions': [],
+        'eval_improvements': []
+    }
 
     # Create root node
     if root_node is None:
@@ -552,10 +544,8 @@ def uct_search(
         backup(root_node, value, value)
 
     assert root_node.to_play == env.to_play
-
     root_legal_actions = env.legal_actions
 
-    # Add dirichlet noise to the prior probabilities to root node.
     if root_noise:
         add_dirichlet_noise(root_node, root_legal_actions)
 
@@ -563,81 +553,120 @@ def uct_search(
 
     while root_node.N < num_simulations:
         node = root_node
-
-        # Make sure do not touch the actual environment.
         sim_env = copy.deepcopy(env)
-        obs = sim_env.observation()
-        done = sim_env.is_game_over()
+        mcts_start = time.perf_counter()
 
-        # Phase 1 - Select
-        #  best child node until one of the following is true:
-        # - reach a leaf node.
-        # - game is over.
+        # Selection phase
         while node.is_expanded:
-            # Select the best move and create the child node on demand
             node = best_child(node, sim_env.legal_actions, c_puct_base, c_puct_init, sim_env.opponent_player)
-            # Make move on the simulation environment.
-            obs, reward, done, _ = sim_env.step(node.move)
-            if done:
+            sim_env.step(node.move)
+            if sim_env.is_game_over():
+                # Get the game result and properly handle termination
+                result = sim_env.get_result()
+                # The result needs to be negated since it's from the last player's perspective
+                backup(node, -result, -result)
                 break
 
-        assert node.to_play == sim_env.to_play
-
-        # Special case - If game is over, using the actual reward from the game to update statistics
-        if done:
-            # The reward is for the last player who made the move won/loss the game.
-            assert node.to_play != sim_env.last_player
-            backup(node, -reward, -reward)
+        # If game ended during selection, continue to next iteration
+        if sim_env.is_game_over():
             continue
+
+        # Show board state periodically using actual game environment
+        if root_node.N % 100 == 0:
+            logger.info(f"\nProgress: {root_node.N}/{num_simulations} simulations")
+            log_board_state(env)
+            logger.info("\nCurrent simulation state:")
+            log_board_state(sim_env)
 
         # Phase 2 - Expand and evaluation
         if use_minimax:
+            minimax_start = time.perf_counter()
             minimax_value = minimax(
                 sim_env, 
                 eval_func, 
                 depth, 
                 k_best, 
-                transposition_table,
+                transposition_table
             )
+            search_stats['minimax_time'] += time.perf_counter() - minimax_start
+            search_stats['minimax_calls'] += 1
 
-            prior_prob, mcts_value = eval_func(obs, False)
-            # expand(node, prior_prob)
-            backup(node, mcts_value, minimax_value)  # Backup with both MCTS and Minimax values
+            # Get prior probabilities only, without redundant value evaluation
+            prior_prob, _ = eval_func(sim_env.observation(), False)
+            
+            # Track evaluation changes - now comparing against 0 since we don't have MCTS value
+            eval_diff = abs(minimax_value)  # Track absolute magnitude of minimax evaluation
+            search_stats['avg_eval_change'] = (search_stats['avg_eval_change'] * (search_stats['minimax_calls'] - 1) + eval_diff) / search_stats['minimax_calls']
+            search_stats['max_eval_change'] = max(search_stats['max_eval_change'], eval_diff)
+            
+            if eval_diff > 0.3:  # Still track significant evaluations
+                search_stats['minimax_improvements'] += 1
+                search_stats['tactical_positions'].append({
+                    'depth': node.depth,
+                    'minimax_value': minimax_value,
+                    'eval_diff': eval_diff
+                })
+                search_stats['eval_improvements'].append(eval_diff)
+                
+                # Show board for significant evaluations
+                logger.info(f"\nSignificant position found at depth {node.depth}:")
+                logger.info(f"Minimax value: {minimax_value:.3f}")
+                log_board_state(sim_env, node.depth, True)
+
+            expand(node, prior_prob)
+            backup(node, minimax_value, minimax_value)  # Use minimax value for both MCTS and minimax backup
         else:
-            prior_prob, value = eval_func(obs, False)
+            prior_prob, value = eval_func(sim_env.observation(), False)
             expand(node, prior_prob)
             backup(node, value, value)
 
-    # Play - generate search policy action probability from the root node's child visit number.
-    search_pi = generate_search_policy(root_node.child_N, 1.0 if warm_up else 0.1, root_legal_actions)
+        search_stats['mcts_time'] += time.perf_counter() - mcts_start
 
+    # Move selection
+    search_pi = generate_search_policy(root_node.child_N, 1.0 if warm_up else 0.1, root_legal_actions)
     move = None
     next_root_node = None
     best_child_Q = 0.0
 
     if deterministic:
-        # Choose the child with most visit count.
         move = np.argmax(root_node.child_N)
     else:
-        # Sample an action
-        # Prevent the agent to select pass move during opening moves
         while move is None or (warm_up and env.has_pass_move and move == env.pass_move) or root_legal_actions[move] != 1:
             move = np.random.choice(np.arange(search_pi.shape[0]), p=search_pi)
 
     if move in root_node.children:
         next_root_node = root_node.children[move]
-
         N, W = copy.copy(next_root_node.N), copy.copy(next_root_node.W)
         next_root_node.parent = DummyNode()
         next_root_node.move = None
         next_root_node.N = N
         next_root_node.W = W
-
-        # Child value is computed from opponent's perspective, so we switch the sign
         best_child_Q = -next_root_node.Q
 
-    assert root_legal_actions[move] == 1
+    # Log final search statistics and analysis
+    search_stats['total_time'] = time.perf_counter() - start_time
+    logger.info("\nSearch completed:")
+    logger.info(f"Total time: {search_stats['total_time']:.2f}s")
+    logger.info(f"MCTS time: {search_stats['mcts_time']:.2f}s")
+    logger.info(f"Minimax time: {search_stats['minimax_time']:.2f}s")
+    
+    if search_stats['minimax_calls'] > 0:
+        logger.info(f"Minimax improvements: {search_stats['minimax_improvements']}/{search_stats['minimax_calls']}")
+        logger.info(f"Average eval change: {search_stats['avg_eval_change']:.3f}")
+        
+        # Additional analysis
+        if search_stats['tactical_positions']:
+            avg_depth = sum(p['depth'] for p in search_stats['tactical_positions']) / len(search_stats['tactical_positions'])
+            logger.info("\nAnalysis:")
+            logger.info(f"Average depth of tactical positions: {avg_depth:.1f}")
+            logger.info(f"Distribution of eval improvements: {np.percentile(search_stats['eval_improvements'], [25, 50, 75])}")
+            
+            # Analyze where minimax helped most
+            max_improvement_pos = max(search_stats['tactical_positions'], key=lambda x: x['eval_diff'])
+            logger.info(f"Largest improvement: {max_improvement_pos['eval_diff']:.3f} at depth {max_improvement_pos['depth']}")
 
+    logger.info(f"Selected move: {move} with Q-value: {best_child_Q:.3f}")
+    
     return move, search_pi, root_node.Q, best_child_Q, next_root_node
 
 

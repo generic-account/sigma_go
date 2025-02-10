@@ -54,8 +54,11 @@ flags.DEFINE_integer(
 flags.DEFINE_float('c_puct_base', 19652, 'Exploration constants balancing priors vs. search values.')
 flags.DEFINE_float('c_puct_init', 1.25, 'Exploration constants balancing priors vs. search values.')
 
-flags.DEFINE_integer('k_best', 5, 'Number of best moves to consider for Minimax value.')
-flags.DEFINE_integer('depth', 2, 'Depth of Minimax search.')
+flags.DEFINE_integer('k_best_black', 3, 'Number of best moves to consider for Black player Minimax value.')
+flags.DEFINE_integer('k_best_white', 1, 'Number of best moves to consider for White player Minimax value.')
+flags.DEFINE_integer('depth_black', 1, 'Depth of Minimax search for Black player.')
+flags.DEFINE_integer('depth_white', 1, 'Depth of Minimax search for White player.')
+
 flags.DEFINE_bool(
     'use_minimax_black',
     True,
@@ -67,7 +70,7 @@ flags.DEFINE_bool(
     'Whether the White player should use Minimax during MCTS search.',
 )
 
-flags.DEFINE_integer('num_games', 2, '')
+flags.DEFINE_integer('num_games', 2, 'Number of games to play')
 
 flags.DEFINE_integer('num_processes', 16, 'Run the games using multiple child processes')
 
@@ -101,7 +104,7 @@ def load_checkpoint_for_net(network, ckpt_file, device):
         logging.warning(f'Invalid checkpoint file "{ckpt_file}"')
 
 
-def mcts_player_builder(network, ckpt_file, device, num_simulations, use_minimax):
+def mcts_player_builder(network, ckpt_file, device, num_simulations, use_minimax, k_best, depth):
     network = network.to(device)
     disable_auto_grad(network)
     load_checkpoint_for_net(network, ckpt_file, device)
@@ -112,8 +115,8 @@ def mcts_player_builder(network, ckpt_file, device, num_simulations, use_minimax
         device=device,
         num_simulations=num_simulations,
         num_parallel=FLAGS.num_parallel,
-        k_best=FLAGS.k_best,
-        depth=FLAGS.depth,
+        k_best=k_best,
+        depth=depth,
         root_noise=False,
         deterministic=False,
         use_minimax=use_minimax,
@@ -132,8 +135,24 @@ def play_one_match(
     c_puct_base,
     c_puct_init,
 ):
-    black_player = mcts_player_builder(black_network, black_ckpt, device, FLAGS.num_simulations_black, FLAGS.use_minimax_black)
-    white_player = mcts_player_builder(white_network, white_ckpt, device, FLAGS.num_simulations_white, FLAGS.use_minimax_white)
+    black_player = mcts_player_builder(
+        black_network, 
+        black_ckpt, 
+        device, 
+        FLAGS.num_simulations_black, 
+        FLAGS.use_minimax_black,
+        FLAGS.k_best_black,
+        FLAGS.depth_black,
+    )
+    white_player = mcts_player_builder(
+        white_network, 
+        white_ckpt, 
+        device, 
+        FLAGS.num_simulations_white, 
+        FLAGS.use_minimax_white,
+        FLAGS.k_best_white,
+        FLAGS.depth_white,
+    )
 
     _ = env.reset()
     while True:
@@ -149,7 +168,10 @@ def play_one_match(
     try:
         if os.path.exists(sgf_dir) and os.path.isdir(sgf_dir):
             sgf_content = env.to_sgf()
-            sgf_file = os.path.join(sgf_dir, f'game_{id}.sgf')
+            # Include minimax and simulation info in filename
+            black_info = f"B_mm{int(FLAGS.use_minimax_black)}_s{FLAGS.num_simulations_black}_d{FLAGS.depth_black}_k{FLAGS.k_best_black}"
+            white_info = f"W_mm{int(FLAGS.use_minimax_white)}_s{FLAGS.num_simulations_white}_d{FLAGS.depth_white}_k{FLAGS.k_best_white}"
+            sgf_file = os.path.join(sgf_dir, f'game_{id}_{black_info}_{white_info}.sgf')
             with open(sgf_file, 'w') as f:
                 f.write(sgf_content)
                 f.close()
@@ -160,8 +182,14 @@ def play_one_match(
         'datetime': get_time_stamp(),
         'black': FLAGS.black_ckpt,
         'white': FLAGS.white_ckpt,
-        'depth': FLAGS.depth,
-        'k_best': FLAGS.k_best,
+        'black_minimax': FLAGS.use_minimax_black,
+        'white_minimax': FLAGS.use_minimax_white,
+        'black_simulations': FLAGS.num_simulations_black,
+        'white_simulations': FLAGS.num_simulations_white,
+        'black_depth': FLAGS.depth_black,
+        'white_depth': FLAGS.depth_white,
+        'black_k_best': FLAGS.k_best_black,
+        'white_k_best': FLAGS.k_best_white,
         'game': id,
         'game_result': env.get_result_string(),
         'game_length': env.steps,
@@ -212,6 +240,12 @@ def main():
 
     logger.info(f'Black: "{FLAGS.black_ckpt}"')
     logger.info(f'White: "{FLAGS.white_ckpt}"')
+    logger.info(f'Black player using minimax: {FLAGS.use_minimax_black}')
+    logger.info(f'White player using minimax: {FLAGS.use_minimax_white}')
+    logger.info(f'Black player simulations: {FLAGS.num_simulations_black}')
+    logger.info(f'White player simulations: {FLAGS.num_simulations_white}')
+    logger.info(f'Black player depth: {FLAGS.depth_black}, k_best: {FLAGS.k_best_black}')
+    logger.info(f'White player depth: {FLAGS.depth_white}, k_best: {FLAGS.k_best_white}')
 
     process_args = [
         (

@@ -38,7 +38,8 @@ flags.DEFINE_string(
     'Load the checkpoint file for white player.',
 )
 
-flags.DEFINE_integer('num_simulations', 90, 'Number of iterations per MCTS search.')
+flags.DEFINE_integer('num_simulations_black', 90, 'Number of iterations per MCTS search for black player.')
+flags.DEFINE_integer('num_simulations_white', 400, 'Number of iterations per MCTS search for white player.')
 flags.DEFINE_integer(
     'num_parallel',
     8,
@@ -48,12 +49,14 @@ flags.DEFINE_integer(
 flags.DEFINE_integer('depth', 1, 'Depth of minimax search')
 flags.DEFINE_integer('k_best', 3, 'The number of best actions to consider in minimax search.')
 
-
 flags.DEFINE_float('c_puct_base', 19652, 'Exploration constants balancing priors vs. search values.')
 flags.DEFINE_float('c_puct_init', 1.25, 'Exploration constants balancing priors vs. search values.')
 
-flags.DEFINE_bool('human_vs_ai', True, 'Black player is human, default on.')
+flags.DEFINE_bool('human_vs_ai', False, 'Black player is human, default on.')
 flags.DEFINE_bool('show_steps', False, 'Show step number on stones, default off.')
+
+flags.DEFINE_bool('use_minimax_black', True, 'Whether black player should use minimax during MCTS search.')
+flags.DEFINE_bool('use_minimax_white', False, 'Whether white player should use minimax during MCTS search.')
 
 flags.DEFINE_integer('seed', 1, 'Seed the runtime.')
 
@@ -100,7 +103,7 @@ def main():
         else:
             logger.warning(f'Invalid checkpoint file "{ckpt_file}"')
 
-    def mcts_player_builder(ckpt_file, device):
+    def mcts_player_builder(ckpt_file, device, num_simulations, use_minimax=False):
         network = network_builder().to(device)
         disable_auto_grad(network)
         load_checkpoint_for_net(network, ckpt_file, device)
@@ -109,13 +112,13 @@ def main():
         return create_mcts_player(
             network=network,
             device=device,
-            num_simulations=FLAGS.num_simulations,
+            num_simulations=num_simulations,
             num_parallel=FLAGS.num_parallel,
             k_best=FLAGS.k_best,
             depth=FLAGS.depth,
             root_noise=False,
             deterministic=True,
-            use_minimax=True,
+            use_minimax=use_minimax,
         )
 
     # Wrap MCTS player for the GUI program
@@ -126,14 +129,19 @@ def main():
 
         return act
 
-    white_player = mcts_player_builder(FLAGS.white_ckpt, runtime_device)
+    white_player = mcts_player_builder(FLAGS.white_ckpt, runtime_device, FLAGS.num_simulations_white, FLAGS.use_minimax_white)
     white_player = wrap_player(white_player)
 
     if FLAGS.human_vs_ai:
         black_player = 'human'
     else:
-        black_player = mcts_player_builder(FLAGS.black_ckpt, runtime_device)
+        black_player = mcts_player_builder(FLAGS.black_ckpt, runtime_device, FLAGS.num_simulations_black, FLAGS.use_minimax_black)
         black_player = wrap_player(black_player)
+
+    logger.info(f"Black player using minimax: {FLAGS.use_minimax_black}")
+    logger.info(f"White player using minimax: {FLAGS.use_minimax_white}")
+    logger.info(f"Black player simulations: {FLAGS.num_simulations_black}")
+    logger.info(f"White player simulations: {FLAGS.num_simulations_white}")
 
     game_gui = BoardGameGui(
         eval_env,

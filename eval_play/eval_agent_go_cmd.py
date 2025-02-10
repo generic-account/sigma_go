@@ -10,6 +10,9 @@ import timeit
 import os
 import sys
 import torch
+import logging
+import colorlog
+from datetime import datetime
 
 FLAGS = flags.FLAGS
 flags.DEFINE_integer('board_size', 9, 'Board size for Go.')
@@ -53,6 +56,13 @@ flags.DEFINE_bool('human_vs_ai', True, 'Black player is human, default on.')
 
 flags.DEFINE_integer('seed', 1, 'Seed the runtime.')
 
+# Add SigmaGo specific parameters
+flags.DEFINE_integer('depth', 2, 'Max depth of minimax search for SigmaGo')
+flags.DEFINE_integer('k_best', 5, 'The number of best actions to consider in minimax search for SigmaGo.')
+flags.DEFINE_integer('num_minimax_threads', 4, 'Number of threads for parallel minimax search in SigmaGo')
+flags.DEFINE_float('minimax_time_limit', 30.0, 'Time limit in seconds for minimax search in SigmaGo')
+flags.DEFINE_integer('max_minimax_leaves', 3, 'Maximum number of leaves to evaluate in minimax for SigmaGo')
+
 # Initialize flags
 FLAGS(sys.argv)
 
@@ -64,9 +74,71 @@ from alpha_zero.core.pipeline import create_mcts_player, set_seed, disable_auto_
 from alpha_zero.utils.util import create_logger
 
 
+# Add logging setup
+def setup_logging():
+    # Create logs directory if it doesn't exist
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # Create a timestamp for the log file
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    log_file = os.path.join(log_dir, f'sigmago_vs_alphazero_{timestamp}.log')
+    
+    # Set up root logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    
+    # Clear any existing handlers
+    logger.handlers.clear()
+    
+    # File handler - logs only analysis metrics
+    file_handler = logging.FileHandler(log_file, mode='w')
+    file_handler.setLevel(logging.INFO)
+    file_formatter = logging.Formatter('%(asctime)s - %(message)s', '%Y-%m-%d %H:%M:%S')
+    file_handler.setFormatter(file_formatter)
+    
+    # Add a filter to only log final analysis metrics
+    class AnalysisFilter(logging.Filter):
+        def filter(self, record):
+            analysis_keywords = [
+                'Search completed:', 'Total time:', 'MCTS time:', 'Minimax time:',
+                'Critical positions:', 'Minimax improvements:',
+                'Average eval change:', 'Max eval change:',
+                'Selected move:', 'Significant improvement found:',
+                'Analysis:'
+            ]
+            return any(keyword in record.msg for keyword in analysis_keywords)
+    
+    file_handler.addFilter(AnalysisFilter())
+    
+    # Console handler - shows everything including board state
+    console_handler = colorlog.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_formatter = colorlog.ColoredFormatter(
+        '%(log_color)s%(message)s',
+        log_colors={
+            'DEBUG': 'cyan',
+            'INFO': 'white',
+            'WARNING': 'yellow',
+            'ERROR': 'red',
+            'CRITICAL': 'red,bg_white',
+        }
+    )
+    console_handler.setFormatter(console_formatter)
+    
+    # Add handlers
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    return logger
+
+
 def main():
+    # Set up logging first
+    logger = setup_logging()
+    logger.info("Starting new game: SigmaGo vs AlphaZero")
+    
     set_seed(FLAGS.seed)
-    logger = create_logger()
 
     runtime_device = 'cpu'
     if torch.cuda.is_available():
@@ -95,7 +167,30 @@ def main():
         else:
             logger.warning(f'Invalid checkpoint file "{ckpt_file}"')
 
-    def mcts_player_builder(ckpt_file, device):
+    def sigmago_player_builder(ckpt_file, device):
+        """Creates a SigmaGo player that uses MCTS with minimax."""
+        network = network_builder().to(device)
+        disable_auto_grad(network)
+        load_checkpoint_for_net(network, ckpt_file, device)
+        network.eval()
+
+        return create_mcts_player(
+            network=network,
+            device=device,
+            num_simulations=FLAGS.num_simulations,
+            num_parallel=FLAGS.num_parallel,
+            k_best=FLAGS.k_best,
+            depth=FLAGS.depth,
+            num_minimax_threads=FLAGS.num_minimax_threads,
+            minimax_time_limit=FLAGS.minimax_time_limit,
+            max_minimax_leaves=FLAGS.max_minimax_leaves,
+            root_noise=False,
+            deterministic=True,
+            use_minimax=True,  # Enable minimax for SigmaGo
+        )
+
+    def alphazero_player_builder(ckpt_file, device):
+        """Creates an AlphaZero player that uses pure MCTS."""
         network = network_builder().to(device)
         disable_auto_grad(network)
         load_checkpoint_for_net(network, ckpt_file, device)
@@ -108,14 +203,24 @@ def main():
             num_parallel=FLAGS.num_parallel,
             root_noise=False,
             deterministic=True,
+            use_minimax=False,  # Disable minimax for AlphaZero
         )
 
-    white_player = mcts_player_builder(FLAGS.white_ckpt, runtime_device)
-
+    # Create players
     if FLAGS.human_vs_ai:
         black_player = 'human'
+        white_player = sigmago_player_builder(FLAGS.sigmago_ckpt, runtime_device)
+        white_player = wrap_player(white_player)
+        white_name = "AlphaZero"
+        black_name = "Human"
     else:
-        black_player = mcts_player_builder(FLAGS.black_ckpt, runtime_device)
+        # AI vs AI: SigmaGo (Black) vs AlphaZero (White)
+        black_player = sigmago_player_builder(FLAGS.sigmago_ckpt, runtime_device)
+        black_player = wrap_player(black_player)
+        white_player = alphazero_player_builder(FLAGS.alphazero_ckpt, runtime_device)
+        white_player = wrap_player(white_player)
+        black_name = "SigmaGo"
+        white_name = "AlphaZero"
 
     # Start to play game
     _ = eval_env.reset()

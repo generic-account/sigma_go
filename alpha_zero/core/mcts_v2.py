@@ -266,7 +266,7 @@ def minimax(
     # Move ordering based on evaluation scores
     move_scores = []
     for action in legal_actions:
-        sim_env = copy.deepcopy(env)
+        sim_env = env.clone()
         sim_env.step(action)
         obs = sim_env.observation()
         _, value = eval_func(obs, False)
@@ -282,7 +282,7 @@ def minimax(
     best_value = alpha if maximizing_player else beta
 
     for action, _ in move_scores:
-        sim_env = copy.deepcopy(env)
+        sim_env = env.clone()
         sim_env.step(action)
         child_value = minimax(
             sim_env,
@@ -553,7 +553,7 @@ def uct_search(
 
     while root_node.N < num_simulations:
         node = root_node
-        sim_env = copy.deepcopy(env)
+        sim_env = env.clone()
         mcts_start = time.perf_counter()
 
         # Selection phase
@@ -805,7 +805,7 @@ def parallel_uct_search(
             node = root_node
 
             # Make sure do not touch the actual environment.
-            sim_env = copy.deepcopy(env)
+            sim_env = env.clone()
             obs = sim_env.observation()
             done = sim_env.is_game_over()
 
@@ -908,3 +908,151 @@ def parallel_uct_search(
     return move, search_pi, root_node.Q, best_child_Q, next_root_node
 
     return pi_probs
+
+def enhanced_minimax(node, depth, k_best, eval_fn, move_ordering=True):
+    """
+    Enhanced minimax with move ordering and k-best pruning.
+    
+    Args:
+        node: Current game node
+        depth: Search depth remaining
+        k_best: Number of top moves to consider
+        eval_fn: Position evaluation function
+        move_ordering: Whether to sort moves by heuristic quality
+    
+    Returns:
+        Minimax value from current player's perspective
+    """
+    if depth == 0 or node.is_terminal():
+        return eval_fn(node)
+    
+    legal_moves = node.get_legal_moves()
+    if not legal_moves:
+        return eval_fn(node)
+
+    # Move ordering: sort moves by immediate heuristic value
+    if move_ordering:
+        move_scores = []
+        for move in legal_moves:
+            child = node.play(move)
+            move_scores.append((eval_fn(child), move))
+        move_scores.sort(reverse=node.to_play() == MAX_PLAYER)
+        ordered_moves = [ms[1] for ms in move_scores]
+    else:
+        ordered_moves = legal_moves
+
+    # K-best pruning - only consider top k moves
+    if k_best < len(ordered_moves):
+        ordered_moves = ordered_moves[:k_best]
+
+    if node.to_play() == MAX_PLAYER:
+        value = -math.inf
+        for move in ordered_moves:
+            child = node.play(move)
+            value = max(value, enhanced_minimax(child, depth-1, k_best, eval_fn))
+            if value >= math.inf:  # Alpha-beta pruning
+                break
+        return value
+    else:
+        value = math.inf
+        for move in ordered_moves:
+            child = node.play(move)
+            value = min(value, enhanced_minimax(child, depth-1, k_best, eval_fn))
+            if value <= -math.inf:
+                break
+        return value
+
+class MCTSNode:
+    def __init__(self, state, parent=None, move=None):
+        self.state = state
+        self.parent = parent
+        self.move = move
+        self.children = {}
+        self.visit_count = 0
+        self.value_sum = 0.0
+        self.prior = 0.0  # New prior field for heuristic guidance
+        
+    def select_child(self, exploration_weight):
+        """
+        Modified UCB selection with heuristic prior integration
+        """
+        total_visits = math.log(self.visit_count + 1)
+        
+        def ucb_score(child):
+            prior_score = exploration_weight * child.prior * math.sqrt(total_visits) / (child.visit_count + 1)
+            exploitation = child.value_sum / (child.visit_count + 1e-8)
+            return exploitation + prior_score
+            
+        return max(self.children.values(), key=ucb_score)
+
+    def expand(self, state, move, prior):
+        """
+        Expand node with minimax-enhanced prior
+        """
+        child = MCTSNode(state, self, move)
+        child.prior = prior
+        self.children[move] = child
+        return child
+
+class MCTS:
+    def __init__(self, config):
+        self.config = config
+        self.eval_fn = config.eval_fn
+        self.transposition_table = {}
+        
+    def run(self, root_state, num_simulations):
+        root = MCTSNode(root_state)
+        
+        for _ in range(num_simulations):
+            # Selection phase
+            node = root
+            search_path = [node]
+            
+            while not node.is_terminal() and node.children:
+                node = node.select_child(self.config.c_puct)
+                search_path.append(node)
+            
+            # Expansion with minimax prior
+            if not node.is_terminal() and not node.children:
+                legal_moves = node.state.get_legal_moves()
+                
+                # Only use minimax for critical nodes (configurable)
+                if self.config.use_minimax(node.state):
+                    minimax_value = enhanced_minimax(
+                        node.state,
+                        depth=self.config.minimax_depth,
+                        k_best=self.config.k_best,
+                        eval_fn=self.eval_fn
+                    )
+                    prior = self._value_to_prior(minimax_value)
+                else:
+                    prior = 0.0  # Fallback to uniform prior
+                
+                # Store in transposition table
+                self.transposition_table[node.state] = prior
+                
+                for move in legal_moves:
+                    child_state = node.state.play(move)
+                    child_prior = self.transposition_table.get(child_state, prior)
+                    node.expand(child_state, move, child_prior)
+            
+            # Backpropagation with minimax value if available
+            value = self._evaluate(node.state)
+            self._backpropagate(search_path, value)
+            
+        return self._get_action_probs(root)
+
+    def _value_to_prior(self, value):
+        """Convert minimax value to prior probability"""
+        return 1 / (1 + math.exp(-value / 0.5))  # Sigmoid scaling
+
+    def _evaluate(self, state):
+        """Hybrid evaluation: combine rollout and minimax value"""
+        if self.config.use_minimax_eval:
+            return enhanced_minimax(
+                state,
+                depth=self.config.eval_depth,
+                k_best=self.config.eval_k_best,
+                eval_fn=self.eval_fn
+            )
+        return self.eval_fn(state)

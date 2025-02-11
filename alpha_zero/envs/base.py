@@ -8,7 +8,7 @@ from typing import Iterable, Tuple, Mapping, Text
 from collections import deque, namedtuple
 import os
 import sys
-from copy import copy
+from copy import copy, deepcopy
 from six import StringIO
 import numpy as np
 import gym
@@ -304,14 +304,17 @@ class BoardGameEnv(gym.Env):
         Returns a 3D tensor with the dimension [N, board_size, board_size],
             where N = 2 x num_stack + 1
         """
-        # Create an empty array to hold the stacked planes, with shape (16, 19, 19)
+        # Convert deque to numpy array, limiting to num_stack entries
+        deltas = np.array(list(self.board_deltas)[:self.num_stack])
+        num_history = len(deltas)
+
+        # Create features array with correct shape
         features = np.zeros((self.num_stack * 2, self.board_size, self.board_size), dtype=np.int8)
 
-        deltas = np.array(self.board_deltas)
-
-        # Current player first, then the opponent
-        features[::2] = deltas == self.to_play
-        features[1::2] = deltas == self.opponent_player
+        # Fill available history states
+        for i in range(num_history):
+            features[2*i] = deltas[i] == self.to_play
+            features[2*i + 1] = deltas[i] == self.opponent_player
 
         # Color to play is a plane with all zeros for white, ones for black.
         color_to_play = np.zeros((1, self.board_size, self.board_size), dtype=np.int8)
@@ -427,3 +430,49 @@ class BoardGameEnv(gym.Env):
     def to_sgf(self) -> str:
         """Game record to sgf content"""
         return
+
+    def clone(self) -> 'BoardGameEnv':
+        """Create an efficient clone of the current environment state.
+        
+        Returns:
+            A new BoardGameEnv instance with copied mutable state and shared immutable state.
+        """
+        # Create new instance with same parameters
+        new_env = self.__class__()
+        
+        # Copy mutable board state using efficient NumPy array copying
+        new_env.board = np.copy(self.board)
+        new_env.legal_actions = np.copy(self.legal_actions)
+        
+        # Copy the board history deque
+        new_env.board_deltas = deque(np.copy(x) for x in self.board_deltas)
+        
+        # Copy game state variables
+        new_env.steps = self.steps
+        new_env.winner = self.winner
+        new_env.last_player = self.last_player
+        new_env.last_move = self.last_move
+        new_env.to_play = self.to_play
+        
+        # Copy move history
+        new_env.history = list(self.history)
+        
+        # Copy current Zobrist hash
+        new_env.current_hash = self.current_hash
+        
+        # Reuse immutable state/constants
+        new_env.board_size = self.board_size
+        new_env.num_stack = self.num_stack
+        new_env.black_player = self.black_player
+        new_env.white_player = self.white_player
+        new_env.has_pass_move = self.has_pass_move
+        new_env.has_resign_move = self.has_resign_move
+        new_env.pass_move = self.pass_move
+        new_env.resign_move = self.resign_move
+        new_env.action_dim = self.action_dim
+        new_env.id = self.id
+        new_env.zobrist_seed = self.zobrist_seed
+        new_env.zobrist_table = self.zobrist_table
+        new_env.zobrist_player = self.zobrist_player
+        
+        return new_env

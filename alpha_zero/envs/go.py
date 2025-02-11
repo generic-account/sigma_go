@@ -7,7 +7,7 @@
 """Go env class."""
 from typing import Tuple, Mapping, Text
 import re
-from copy import copy
+from copy import copy, deepcopy
 import numpy as np
 
 from alpha_zero.envs.base import BoardGameEnv
@@ -208,3 +208,21 @@ class GoEnv(BoardGameEnv):
             komi=self.komi,
             date=get_time_stamp(),
         )
+
+    def clone(self) -> 'GoEnv':
+        """Create an efficient clone of the current environment state.
+        
+        Returns:
+            A new GoEnv instance with copied mutable state and shared immutable state.
+        """
+        # First clone the base environment state
+        new_env = super().clone()
+        
+        # Copy Go-specific state
+        new_env.komi = self.komi
+        new_env.max_steps = self.max_steps
+        
+        # Deep copy the Position object since it contains mutable state
+        new_env.position = deepcopy(self.position)
+        
+        return new_env

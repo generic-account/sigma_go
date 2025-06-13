@@ -129,13 +129,13 @@ def main():
 
         return act
 
-    white_player = mcts_player_builder(FLAGS.white_ckpt, runtime_device, FLAGS.num_simulations_black, FLAGS.use_minimax_black)
+    white_player = mcts_player_builder(FLAGS.white_ckpt, runtime_device, FLAGS.num_simulations_white, FLAGS.use_minimax_white)
     white_player = wrap_player(white_player)
 
     if FLAGS.human_vs_ai:
         black_player = 'human'
     else:
-        black_player = mcts_player_builder(FLAGS.black_ckpt, runtime_device, FLAGS.num_simulations_white, FLAGS.use_minimax_white)
+        black_player = mcts_player_builder(FLAGS.black_ckpt, runtime_device, FLAGS.num_simulations_black, FLAGS.use_minimax_black)
         black_player = wrap_player(black_player)
 
     logger.info(f"Black player using minimax: {FLAGS.use_minimax_black}")

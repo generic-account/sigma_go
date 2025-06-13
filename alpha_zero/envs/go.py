@@ -199,6 +199,15 @@ class GoEnv(BoardGameEnv):
 
         return string
 
+    def get_result(self) -> float:
+        """A wrapper around `get_result_string` to return a numerical result."""
+        result_str = self.get_result_string()
+        if re.match(r'B\+', result_str, re.IGNORECASE):
+            return 1.0
+        elif re.match(r'W\+', result_str, re.IGNORECASE):
+            return -1.0
+        return 0.0
+
     def to_sgf(self) -> str:
         return sgf_wrapper.make_sgf(
             board_size=self.board_size,

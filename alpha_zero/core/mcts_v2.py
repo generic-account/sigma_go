@@ -6,49 +6,6 @@
 """A much faster MCTS-Minimax hybrid implementation for AlphaZero.
 Where we use Numpy arrays to store node statistics,
 and create child nodes on demand.
-
-This implementation combines MCTS with minimax search to get the best of both approaches:
-- MCTS for selective tree expansion and exploration 
-- Minimax for tactical calculation and pruning
-- Transposition table for caching positions
-- Principal variation tracking
-
-The hybrid approach works by:
-1. Using MCTS to guide the high-level search and identify promising variations
-2. Switching to minimax search at leaf nodes to calculate tactical sequences
-3. Using a transposition table to cache and reuse search results
-4. Propagating minimax values back up through the MCTS tree
-
-The positions are evaluated from the current player's perspective.
-
-For example, in a two-player zero-sum game:
-
-        A           Black to move (root)
-       / \
-      B   C         White to move
-     / \
-    D   E           Black to move
-
-When evaluating positions:
-- Node A represents Black's turn to move
-- Nodes B,C represent positions after White's moves
-- Nodes D,E represent positions after Black's moves
-
-The evaluation scores are always from the perspective of the player to move.
-So when selecting the best child of node A:
-
-1. If B has score 0.8 and C has score 0.3 (from White's perspective)
-2. We negate these scores to get Black's perspective: -0.8 and -0.3
-3. Black should choose C since max(-0.8, -0.3) = -0.3
-
-This is implemented by negating child Q-values during selection:
-    ucb_scores = -node.child_Q() + node.child_U()
-
-The hybrid approach combines:
-- MCTS's ability to focus search on promising variations
-- Minimax's tactical strength and pruning
-- Efficient position caching via transposition table
-- Principal variation tracking for best line analysis
 """
 
 import copy
@@ -59,33 +16,32 @@ import numpy as np
 import logging
 from typing import Callable, Tuple, Mapping, Iterable, Any
 from enum import Enum
+import yaml
 
 
 from alpha_zero.envs.base import BoardGameEnv
+from alpha_zero.core.triggers import TriggerController
+from alpha_zero.core.minimax import AlphaBetaEngine
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,  # Change to logging.DEBUG for more detailed output
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
 logger = logging.getLogger(__name__)
 
-class NodeType(Enum):
-    """
-    Enumeration for the type of node in the transposition table.
-    """
-    EXACT = 0
-    LOWERBOUND = 1
-    UPPERBOUND = 2
 
 class DummyNode(object):
     """A placeholder to make computation possible for the root node."""
 
-    def __init__(self):
+    def __init__(self, num_actions=9):
         self.parent = None
-        self.child_W = collections.defaultdict(float)
-        self.child_N = collections.defaultdict(float)
+        self.child_W = np.zeros(num_actions, dtype=np.float32)
+        self.child_N = np.zeros(num_actions, dtype=np.float32)
+        self.child_W_p = np.zeros(num_actions, dtype=np.float32)
+        self.child_N_p = np.zeros(num_actions, dtype=np.float32)
+        self.N = 0
+
+    def child_Q(self):
+        """Mock child_Q for the dummy node."""
+        child_N = np.where(self.child_N > 0, self.child_N, 1)
+        return self.child_W / child_N
+
 
 class Node:
     """Node in the MCTS search tree."""
@@ -96,18 +52,8 @@ class Node:
         num_actions: np.ndarray,
         move: int = None,
         parent: Any = None,
-        depth: int = 0,  # Added to keep track of depth of the node in MCTS tree
+        depth: int = 0,
     ) -> None:
-        """
-        Args:
-            to_play: the id of the current player.
-            num_actions: number of total actions, including illegal move.
-            prior: a prior probability of the node for a specific action, could be empty in case of root node.
-            move: the action associated with the prior probability.
-            parent: the parent node, could be a `DummyNode` if this is the root node.
-            depth: the depth of the node in the MCTS tree.
-        """
-
         self.to_play = to_play
         self.move = move
         self.parent = parent
@@ -118,512 +64,262 @@ class Node:
         self.child_W = np.zeros(num_actions, dtype=np.float32)
         self.child_N = np.zeros(num_actions, dtype=np.float32)
         self.child_P = np.zeros(num_actions, dtype=np.float32)
+        
+        self.child_W_p = np.zeros(num_actions, dtype=np.float32)
+        self.child_N_p = np.zeros(num_actions, dtype=np.float32)
 
         self.children: Mapping[int, Node] = {}
-
-        # Number of virtual losses on this node, only used in 'parallel_uct_search'
         self.losses_applied = 0
 
+        self.minimax_eval = None
+        self.has_solver_proof = False
+        self.is_terminal_proof = False
+        self.uncertainty_metrics = {}
+
+        self._W = 0.0
+        self._N = 0
+
     def child_U(self, c_puct_base: float, c_puct_init: float) -> np.ndarray:
-        """Returns a 1D numpy.array contains prior score for all child."""
         pb_c = math.log((1 + self.N + c_puct_base) / c_puct_base) + c_puct_init
         return pb_c * self.child_P * (math.sqrt(self.N) / (1 + self.child_N))
 
     def child_Q(self):
-        """Returns a 1D numpy.array contains mean action value for all child."""
-        # Avoid division by zero
         child_N = np.where(self.child_N > 0, self.child_N, 1)
-
         return self.child_W / child_N
 
     @property
+    def child_losses_applied(self) -> np.ndarray:
+        return np.array([self.children[a].losses_applied if a in self.children else 0 for a in range(self.num_actions)], dtype=np.int32)
+
+    @property
     def N(self):
-        """The number of visits for current node is stored at parent's level."""
+        if self.parent is None:
+            return self._N
+        if self.move is None:
+            return sum(self.child_N)
         return self.parent.child_N[self.move]
 
     @N.setter
     def N(self, value):
-        """The total number of visits for current node at parent's level."""
-        self.parent.child_N[self.move] = value
+        if self.parent is None:
+            self._N = value
+        elif self.move is not None:
+            self.parent.child_N[self.move] = value
 
     @property
     def W(self):
-        """The total value for current node is stored at parent's level."""
+        if self.parent is None:
+            return self._W
         return self.parent.child_W[self.move]
 
     @W.setter
     def W(self, value):
-        """The total value for current node is stored at parent's level."""
-        self.parent.child_W[self.move] = value
+        if self.parent is None:
+            self._W = value
+        elif self.move is not None:
+            self.parent.child_W[self.move] = value
 
     @property
     def Q(self):
-        """Returns the mean action value Q(s, a)."""
-        if self.parent.child_N[self.move] > 0:
-            return self.parent.child_W[self.move] / self.parent.child_N[self.move]
-        else:
-            return 0.0
+        if self.N > 0:
+            return self.W / self.N
+        return 0.0
 
     @property
     def has_parent(self) -> bool:
-        """Check if the node has a parent."""
         return isinstance(self.parent, Node)
-
-class TranspositionTable:
-    """
-    Transposition Table for storing and retrieving previously computed states.
-    """
-    def __init__(self, size=1000000):
-        """
-        Initialize the transposition table with a given size.
-
-        Args:
-            size: The maximum number of entries the table can hold.
-        """
-        self.table = {}
-        self.size = size
-
-    def store(self, zobrist_hash, depth, value, flag):
-        """
-        Store a new entry in the transposition table.
-
-        Args:
-            zobrist_hash: The hash of the current board state.
-            depth: The depth at which this state was evaluated.
-            value: The evaluation value of the current state.
-            flag: The type of node (EXACT, LOWERBOUND, UPPERBOUND).
-        """
-        if len(self.table) >= self.size:
-            self.table.pop(next(iter(self.table)))
-        self.table[zobrist_hash] = (depth, value, flag)
-    
-    def lookup(self, zobrist_hash):
-        """
-        Retrieve an entry from the transposition table if it exists.
-
-        Args:
-            zobrist_hash: The hash of the current board state.
-
-        Returns:
-            A tuple containing the depth, value, and flag of the state if found,
-            otherwise None.
-        """
-        return self.table.get(zobrist_hash)
-
-
-def minimax(
-    env: BoardGameEnv,
-    eval_func: Callable[[np.ndarray, bool], Tuple[Iterable[np.ndarray], Iterable[float]]],
-    depth: int,
-    k_best: int = None,
-    transposition_table: TranspositionTable = None,
-    alpha: float = -float('inf'),
-    beta: float = float('inf'),
-) -> float:
-    """
-    Perfroms a depth-limited minimax search with alpha-beta pruning, move ordering, and transposition tables.
-
-    Args:
-        env: The game environment.
-        eval_func: Evaluation function that returns action probabilities and predicted values.
-        depth: The maximum depth to search.
-        k_best: Number of best moves to consider at each depth.
-        transposition_table: Table to store and retrieve previously computed states.
-        alpha: The alpha value for alpha-beta pruning.
-        beta: The beta value for alpha-beta pruning.
-
-    Returns:
-        The best evaluation value found within the given depth constraints.
-
-    """
-    if transposition_table is None:
-        transposition_table = TranspositionTable()
-
-    zobrist_hash = env.zobrist_hash()
-    tt_entry = transposition_table.lookup(zobrist_hash)
-
-    if tt_entry is not None:
-        stored_depth, stored_value, stored_flag = tt_entry
-        if stored_depth >= depth:
-            if stored_flag == NodeType.EXACT:
-                return stored_value
-            elif stored_flag == NodeType.LOWERBOUND:
-                alpha = max(alpha, stored_value)
-            elif stored_flag == NodeType.UPPERBOUND:
-                beta = min(beta, stored_value)
-            if alpha >= beta:
-                return stored_value
-
-    if depth == 0 or env.is_game_over():
-        obs = env.observation()
-        _, value = eval_func(obs, False)
-        assert isinstance(value, float), f"Expected scalar, got {type(value)}"
-        transposition_table.store(zobrist_hash, depth, value, NodeType.EXACT)
-        return value
-
-    legal_actions = np.where(env.legal_actions == 1)[0]
-
-    # Move ordering based on evaluation scores
-    move_scores = []
-    for action in legal_actions:
-        sim_env = env.clone()
-        sim_env.step(action)
-        obs = sim_env.observation()
-        _, value = eval_func(obs, False)
-        move_scores.append((action, value))
-
-    # Sort moves by value (descending for maximizing player, ascending for minimizing)
-    maximizing_player = env.to_play
-    move_scores.sort(key=lambda x: x[1], reverse=maximizing_player)
-
-    if k_best is not None:
-        move_scores = move_scores[:k_best]
-
-    best_value = alpha if maximizing_player else beta
-
-    for action, _ in move_scores:
-        sim_env = env.clone()
-        sim_env.step(action)
-        child_value = minimax(
-            sim_env,
-            eval_func,
-            depth - 1,
-            k_best,
-            transposition_table
-        )
-
-        if maximizing_player:
-            best_value = max(best_value, child_value)
-            alpha = max(alpha, best_value)
-        else:
-            best_value = min(best_value, child_value)
-            beta = min(beta, best_value)
-
-        if beta <= alpha:
-            break
-
-    # Store the result in the transposition table
-    if best_value <= alpha:
-        flag = NodeType.UPPERBOUND
-    elif best_value >= beta:
-        flag = NodeType.LOWERBOUND
-    else:
-        flag = NodeType.EXACT
-
-    transposition_table.store(zobrist_hash, depth, best_value, flag)
-    return best_value
-        
 
 def best_child(
     node: Node,
     legal_actions: np.ndarray,
     c_puct_base: float,
     c_puct_init: float,
-    child_to_play: int,
 ) -> Node:
-    """Returns best child node with maximum action value Q plus an upper confidence bound U.
-    And creates the selected best child node if not already exists.
-
-    Args:
-        node: the current node in the search tree.
-        legal_actions: a 1D bool numpy.array mask for all actions,
-                where `1` represents legal move and `0` represents illegal move.
-        c_puct_base: a float constant determining the level of exploration.
-        c_puct_init: a float constant determining the level of exploration.
-        child_to_play: the player id for children nodes.
-
-    Returns:
-        The best child node corresponding to the UCT score.
-
-    Raises:
-        ValueError:
-            if the node instance itself is a leaf node.
-    """
     if not node.is_expanded:
         raise ValueError('Expand leaf node first.')
 
-    # The child Q value is evaluated from the opponent perspective. when we select the best child for node,
-    # we want to do so from node.to_play's perspective, so we always switch the sign for node.child_Q values,
-    # this is required since we're talking about two-player, zero-sum games.
-    hybrid_ucb_scores = -node.child_Q() + node.child_U(c_puct_base, c_puct_init)
+    child_Q = node.child_Q()
+    child_U = node.child_U(c_puct_base, c_puct_init)
+    
+    ucb_scores = -child_Q - node.child_losses_applied + child_U
+    ucb_scores = np.where(legal_actions, ucb_scores, -9999.0)
+    move = np.argmax(ucb_scores)
 
-    scores = np.where(legal_actions == 1, hybrid_ucb_scores, -9999)
-    move = np.argmax(scores)
-
-    assert legal_actions[move] == 1
+    assert legal_actions[move]
 
     if move not in node.children:
         node.children[move] = Node(
-            to_play=child_to_play, num_actions=node.num_actions, move=move, parent=node, depth=node.depth + 1
+            to_play=1 - node.to_play,
+            num_actions=node.num_actions,
+            move=move,
+            parent=node,
+            depth=node.depth + 1,
         )
-
     return node.children[move]
 
-
 def expand(node: Node, prior_prob: np.ndarray) -> None:
-    """Expand all actions, including illegal actions.
-
-    Args:
-        node: current leaf node in the search tree.
-        prior_prob: 1D numpy.array contains prior probabilities of the state for all actions.
-
-    Raises:
-        ValueError:
-            if node instance already expanded.
-            if input argument `prior` is not a valid 1D float numpy.array.
-    """
     if node.is_expanded:
         raise RuntimeError('Node already expanded.')
-    if (
-        not isinstance(prior_prob, np.ndarray)
-        or len(prior_prob.shape) != 1
-        or prior_prob.dtype not in (np.float32, np.float64)
-    ):
-        raise ValueError(f'Expect `prior_prob` to be a 1D float numpy.array, got {prior_prob}')
-
     node.child_P = prior_prob
     node.is_expanded = True
 
-
-def backup(node: Node, mcts_value: float, minimax_value: float) -> None:
-    """Update statistics of the node and all traversed parent nodes.
-
-    Args:
-        node: current leaf node in the search tree.
-        mcts_value: the evaluation value evaluated from 'the mcts algorithm of the current player's perspective.
-        minimax_value: the evaluation value evaluated from minimax algorithm of the current player's perspective.
-
-    Raises:
-        ValueError:
-            if input argument `value` is not float data type.
-    """
-
-    if not isinstance(mcts_value, float) or not isinstance(minimax_value, float):
-        raise ValueError("Both mcts_value and minimax_value must be floats.")
-
+def backup(node: Node, mcts_value: float, minimax_value: float, backprop_config: dict) -> None:
+    """Update statistics of the node and all traversed parent nodes using advanced backpropagation."""
     max_use_minimax_depth = 10
-
-    # Calculate weight based on node depth
     weight = max(0.0, min(1.0, node.depth / max_use_minimax_depth))
+    value = mcts_value * (1 - weight) + minimax_value * weight
 
-    combined_value = mcts_value * (1 - weight) + minimax_value * weight
+    current_node = node
+    while current_node is not None:
+        if current_node.parent is not None:
+            parent = current_node.parent
+            move = current_node.move
+            
+            value_for_parent = -value
 
-    while isinstance(node, Node):
-        node.N += 1
-        node.W += combined_value
-        node = node.parent
-        combined_value = -1 * combined_value
+            if current_node.is_terminal_proof:
+                value_for_parent = -minimax_value
+            else:
+                delta = backprop_config.get('implicit_minimax_delta', 0.9)
+                min_visits = backprop_config.get('implicit_minimax_min_visits', 10)
+                
+                if parent.N >= min_visits:
+                    child_Q = parent.child_Q()
+                    valid_children = parent.child_N > 0
+                    if np.count_nonzero(valid_children) > 1:
+                        mean_q = np.mean(child_Q[valid_children])
+                        if np.max(np.abs(child_Q[valid_children] - mean_q)) > delta:
+                            best_child_idx = np.argmax(np.abs(child_Q))
+                            value_for_parent = -child_Q[best_child_idx]
 
+            parent.child_N[move] += 1
+            parent.child_W[move] += value_for_parent
+            
+            p_schedule = backprop_config.get('power_p_schedule', [[0, 1.0]])
+            p = p_schedule[-1][1]
+            for visit_threshold, p_value in reversed(p_schedule):
+                if parent.N >= visit_threshold:
+                    p = p_value
+                    break
+            
+            power_val = np.clip(value, -1.0, 1.0)
+            parent.child_W_p[move] += np.sign(power_val) * (np.abs(power_val) ** p)
+            parent.child_N_p[move] += 1
+        else: # Root node
+            current_node.N += 1
+            current_node.W += value
+
+        value = -value
+        current_node = current_node.parent
 
 def add_dirichlet_noise(node: Node, legal_actions: np.ndarray, eps: float = 0.25, alpha: float = 0.03) -> None:
-    """Add dirichlet noise to a given node.
-
-    Args:
-        node: the root node we want to add noise to.
-        legal_actions: a 1D bool numpy.array mask for all actions,
-            where `1` represents legal move and `0` represents illegal move.
-        eps: epsilon constant to weight the priors vs. dirichlet noise.
-        alpha: parameter of the dirichlet noise distribution.
-
-    Raises:
-        ValueError:
-            if input argument `node` is not expanded.
-            if input argument `eps` or `alpha` is not float type
-                or not in the range of [0.0, 1.0].
-    """
-
-    if not isinstance(node, Node) or not node.is_expanded:
-        raise ValueError('Expect `node` to be expanded')
-    if not isinstance(eps, float) or not 0.0 <= eps <= 1.0:
-        raise ValueError(f'Expect `eps` to be a float in the range [0.0, 1.0], got {eps}')
-    if not isinstance(alpha, float) or not 0.0 <= alpha <= 1.0:
-        raise ValueError(f'Expect `alpha` to be a float in the range [0.0, 1.0], got {alpha}')
-
     alphas = np.ones_like(legal_actions) * alpha
     noise = legal_actions * np.random.dirichlet(alphas)
-
     node.child_P = node.child_P * (1 - eps) + noise * eps
 
-
 def generate_search_policy(child_N: np.ndarray, temperature: float, legal_actions: np.ndarray) -> np.ndarray:
-    """Returns a policy action probabilities after MCTS search,
-    proportional to its exponentialted visit count.
-
-    Args:
-        child_N: the visit number of the children nodes from the root node of the search tree.
-        temperature: a parameter controls the level of exploration.
-        legal_actions: a 1D bool numpy.array mask for all actions,
-            where `1` represents legal move and `0` represents illegal move.
-
-    Returns:
-        a 1D numpy.array contains the action probabilities after MCTS search.
-
-    Raises:
-        ValueError:
-            if input argument `temperature` is not float type or not in range (0.0, 1.0].
-    """
-    if not isinstance(temperature, float) or not 0 < temperature <= 1.0:
-        raise ValueError(f'Expect `temperature` to be float type in the range (0.0, 1.0], got {temperature}')
-
-    child_N = legal_actions * child_N
-
     if temperature > 0.0:
-        # Simple hack to avoid overflow when call np.power over large numbers
         exp = max(1.0, min(5.0, 1.0 / temperature))
         child_N = np.power(child_N, exp)
-
-    assert np.all(child_N >= 0) and not np.any(np.isnan(child_N))
-    pi_probs = child_N
+    pi_probs = legal_actions * child_N
     sums = np.sum(pi_probs)
     if sums > 0:
         pi_probs /= sums
-
     return pi_probs
 
-
-def log_timing(start_time, message, move=None):
-    """Helper function to log timing information."""
+def log_timing(start_time, message):
     elapsed = time.perf_counter() - start_time
-    if move is not None:
-        logger.info(f"Move {move} completed in {elapsed:.2f} seconds")
-    else:
-        logger.info(f"{message}: {elapsed:.2f} seconds")
-
-def log_board_state(env, depth=None, is_tactical=False):
-    """Helper function to log the current board state with context."""
-    if depth is not None:
-        if is_tactical:
-            logger.info(f"\nAnalyzing tactical position at depth {depth}:")
-        else:
-            logger.info(f"\nPosition at depth {depth}:")
-    else:
-        logger.info("\nCurrent board state:")
-    logger.info(f"{env.position}")
-    logger.info(f"Current player: {env.to_play}")
+    logger.info(f'{message}: {elapsed:.2f} seconds')
 
 def uct_search(
     env: BoardGameEnv,
     eval_func: Callable[[np.ndarray, bool], Tuple[Iterable[np.ndarray], Iterable[float]]],
     root_node: Node,
+    num_simulations: int,
     c_puct_base: float,
     c_puct_init: float,
-    k_best: int,
-    depth: int,
-    num_simulations: int = 800,
     root_noise: bool = False,
     warm_up: bool = False,
     deterministic: bool = False,
     use_minimax: bool = False,
+    k_best: int = 1,
+    depth: int = 1,
+    trigger_config_path: str = 'config/trigger_config.yaml',
 ) -> Tuple[int, np.ndarray, float, float, Node]:
-
-    # Start time of the search
     start_time = time.perf_counter()
-    logger.info("Starting MCTS search...")
 
-    # Show initial board state using actual game environment
-    log_board_state(env)
+    try:
+        with open(trigger_config_path, 'r') as f:
+            config = yaml.safe_load(f)
+    except FileNotFoundError:
+        logger.warning(f"Trigger config file not found at {trigger_config_path}. Using default values.")
+        config = {}
 
-    # Initialize search statistics
-    search_stats = {
-        'total_time': 0.0,
-        'mcts_time': 0.0,
-        'minimax_time': 0.0,
-        'minimax_calls': 0,
-        'minimax_improvements': 0,
-        'avg_eval_change': 0.0,
-        'max_eval_change': 0.0,
-        'tactical_positions': [],
-        'eval_improvements': []
-    }
+    trigger_controller = TriggerController(config)
+    alpha_beta_engine = AlphaBetaEngine(eval_func)
+    backprop_config = config.get('backprop_config', {})
 
-    # Create root node
     if root_node is None:
+        root_node = Node(to_play=env.to_play, num_actions=env.action_space.n, parent=None)
+
+    if not root_node.is_expanded:
         prior_prob, value = eval_func(env.observation(), False)
-        root_node = Node(to_play=env.to_play, num_actions=env.action_dim, parent=DummyNode())
         expand(root_node, prior_prob)
-        backup(root_node, value, value)
+        backup(root_node, value, value, backprop_config)
 
-    assert root_node.to_play == env.to_play
-    root_legal_actions = env.legal_actions
-
+    legal_actions = env.legal_actions
+    
+    dirichlet_alpha = 0.03
+    dirichlet_eps = 0.25
     if root_noise:
-        add_dirichlet_noise(root_node, root_legal_actions)
+        add_dirichlet_noise(root_node, legal_actions, dirichlet_eps, dirichlet_alpha)
+    
+    trigger_controller.reset()
 
-    transposition_table = TranspositionTable()
-
-    while root_node.N < num_simulations:
-        node = root_node
+    for _ in range(num_simulations):
         sim_env = env.clone()
-        mcts_start = time.perf_counter()
+        node = root_node
+        last_move = None
+        rollout_len = 0
 
-        # Selection phase
         while node.is_expanded:
-            node = best_child(node, sim_env.legal_actions, c_puct_base, c_puct_init, sim_env.opponent_player)
+            node = best_child(node, sim_env.legal_actions, c_puct_base, c_puct_init)
             sim_env.step(node.move)
+            last_move = node.move
+            rollout_len += 1
             if sim_env.is_game_over():
-                # Get the game result and properly handle termination
-                result = sim_env.get_result()
-                # The result needs to be negated since it's from the last player's perspective
-                backup(node, -result, -result)
                 break
 
-        # If game ended during selection, continue to next iteration
         if sim_env.is_game_over():
+            result = sim_env.get_result()
+            backup(node, -result, -result, backprop_config)
             continue
 
-        # Show board state periodically using actual game environment
-        if root_node.N % 100 == 0:
-            logger.info(f"\nProgress: {root_node.N}/{num_simulations} simulations")
-            log_board_state(env)
-            logger.info("\nCurrent simulation state:")
-            log_board_state(sim_env)
+        prior_prob, leaf_value = eval_func(sim_env.observation(), False)
+        expand(node, prior_prob)
+        minimax_value = leaf_value
 
-        # Phase 2 - Expand and evaluation
-        if use_minimax:
-            minimax_start = time.perf_counter()
-            minimax_value = minimax(
-                sim_env, 
-                eval_func, 
-                depth, 
-                k_best, 
-                transposition_table
-            )
-            search_stats['minimax_time'] += time.perf_counter() - minimax_start
-            search_stats['minimax_calls'] += 1
+        if use_minimax and rollout_len < 4:
+            minimax_value = alpha_beta_engine.search(sim_env, depth=2, k_best=8)
 
-            # Get prior probabilities only, without redundant value evaluation
-            prior_prob, _ = eval_func(sim_env.observation(), False)
-            
-            # Track evaluation changes - now comparing against 0 since we don't have MCTS value
-            eval_diff = abs(minimax_value)  # Track absolute magnitude of minimax evaluation
-            search_stats['avg_eval_change'] = (search_stats['avg_eval_change'] * (search_stats['minimax_calls'] - 1) + eval_diff) / search_stats['minimax_calls']
-            search_stats['max_eval_change'] = max(search_stats['max_eval_change'], eval_diff)
-            
-            if eval_diff > 0.3:  # Still track significant evaluations
-                search_stats['minimax_improvements'] += 1
-                search_stats['tactical_positions'].append({
-                    'depth': node.depth,
-                    'minimax_value': minimax_value,
-                    'eval_diff': eval_diff
-                })
-                search_stats['eval_improvements'].append(eval_diff)
-                
-                # Show board for significant evaluations
-                logger.info(f"\nSignificant position found at depth {node.depth}:")
-                logger.info(f"Minimax value: {minimax_value:.3f}")
-                log_board_state(sim_env, node.depth, True)
+        if use_minimax and trigger_controller.should_minimax(node, sim_env, last_move):
+            search_depth = 4 if trigger_controller.is_tactical else 2
+            search_k_best = 4 if trigger_controller.is_tactical else 8
+            minimax_value = alpha_beta_engine.search(sim_env, depth=search_depth, k_best=search_k_best)
+            node.minimax_eval = minimax_value
 
-            expand(node, prior_prob)
-            backup(node, minimax_value, minimax_value)  # Use minimax value for both MCTS and minimax backup
-        else:
-            prior_prob, value = eval_func(sim_env.observation(), False)
-            expand(node, prior_prob)
-            backup(node, value, value)
+        remaining_empty = np.sum(sim_env.board == -1) if hasattr(sim_env, 'board') else 0
+        if use_minimax and hasattr(sim_env, 'board_size') and sim_env.board_size == 9 and (remaining_empty <= 12 or node.depth >= 8):
+            is_proven, proven_value = alpha_beta_engine.solver_search(sim_env)
+            if is_proven:
+                node.is_terminal_proof = True
+                minimax_value = proven_value
 
-        search_stats['mcts_time'] += time.perf_counter() - mcts_start
+        backup(node, leaf_value, minimax_value, backprop_config)
 
-    # Move selection
-    search_pi = generate_search_policy(root_node.child_N, 1.0 if warm_up else 0.1, root_legal_actions)
+    temperature = 1.0 if warm_up else 0.1
+    search_pi = generate_search_policy(root_node.child_N, temperature, legal_actions)
+
     move = None
     next_root_node = None
     best_child_Q = 0.0
@@ -631,71 +327,29 @@ def uct_search(
     if deterministic:
         move = np.argmax(root_node.child_N)
     else:
-        while move is None or (warm_up and env.has_pass_move and move == env.pass_move) or root_legal_actions[move] != 1:
+        while move is None or (warm_up and env.has_pass_move and move == env.pass_move) or legal_actions[move] != 1:
             move = np.random.choice(np.arange(search_pi.shape[0]), p=search_pi)
 
-    if move in root_node.children:
-        next_root_node = root_node.children[move]
-        N, W = copy.copy(next_root_node.N), copy.copy(next_root_node.W)
-        next_root_node.parent = DummyNode()
-        next_root_node.move = None
-        next_root_node.N = N
-        next_root_node.W = W
-        best_child_Q = -next_root_node.Q
+    next_root_node = root_node.children[move]
+    next_root_node.parent = None
+    best_child_Q = -next_root_node.Q
 
-    # Log final search statistics and analysis
-    search_stats['total_time'] = time.perf_counter() - start_time
-    logger.info("\nSearch completed:")
-    logger.info(f"Total time: {search_stats['total_time']:.2f}s")
-    logger.info(f"MCTS time: {search_stats['mcts_time']:.2f}s")
-    logger.info(f"Minimax time: {search_stats['minimax_time']:.2f}s")
-    
-    if search_stats['minimax_calls'] > 0:
-        logger.info(f"Minimax improvements: {search_stats['minimax_improvements']}/{search_stats['minimax_calls']}")
-        logger.info(f"Average eval change: {search_stats['avg_eval_change']:.3f}")
-        
-        # Additional analysis
-        if search_stats['tactical_positions']:
-            avg_depth = sum(p['depth'] for p in search_stats['tactical_positions']) / len(search_stats['tactical_positions'])
-            logger.info("\nAnalysis:")
-            logger.info(f"Average depth of tactical positions: {avg_depth:.1f}")
-            logger.info(f"Distribution of eval improvements: {np.percentile(search_stats['eval_improvements'], [25, 50, 75])}")
-            
-            # Analyze where minimax helped most
-            max_improvement_pos = max(search_stats['tactical_positions'], key=lambda x: x['eval_diff'])
-            logger.info(f"Largest improvement: {max_improvement_pos['eval_diff']:.3f} at depth {max_improvement_pos['depth']}")
-
-    logger.info(f"Selected move: {move} with Q-value: {best_child_Q:.3f}")
-    
-    return move, search_pi, root_node.Q, best_child_Q, next_root_node
-
+    log_timing(start_time, "UCT search")
+    return (move, search_pi, root_node.Q, best_child_Q, next_root_node)
 
 def add_virtual_loss(node: Node) -> None:
-    """Propagate a virtual loss to the traversed path.
-
-    Args:
-        node: current leaf node in the search tree.
-    """
-    # This is a loss for both players in the traversed path,
-    # since we want to avoid multiple threads to select the same path.
-    # However since we'll be switching the sign for child_Q when selecting the best child,
-    # here we use +1 instead of -1.
+    """Propagate a virtual loss to the traversed path."""
     vloss = +1
-    while isinstance(node, Node):
+    while node is not None:
         node.losses_applied += 1
         node.W += vloss
         node = node.parent
 
 
 def revert_virtual_loss(node: Node) -> None:
-    """Undo virtual loss to the traversed path.
-
-    Args:
-        node: current leaf node in the search tree.
-    """
-
+    """Undo virtual loss to the traversed path."""
     vloss = -1
-    while isinstance(node, Node):
+    while node is not None:
         if node.losses_applied > 0:
             node.losses_applied -= 1
             node.W += vloss
@@ -704,355 +358,112 @@ def revert_virtual_loss(node: Node) -> None:
 
 def parallel_uct_search(
     env: BoardGameEnv,
-    eval_func: Callable[[np.ndarray], Tuple[Iterable[np.ndarray], Iterable[float]]],
+    eval_func: Callable[[np.ndarray, bool], Tuple[Iterable[np.ndarray], Iterable[float]]],
     root_node: Node,
-    c_puct_base: float,
-    c_puct_init: float,
     num_simulations: int,
     num_parallel: int,
-    k_best: int,
-    depth: int,
+    c_puct_base: float,
+    c_puct_init: float,
     root_noise: bool = False,
     warm_up: bool = False,
     deterministic: bool = False,
     use_minimax: bool = False,
+    k_best: int = 1,
+    depth: int = 1,
+    trigger_config_path: str = 'config/trigger_config.yaml',
 ) -> Tuple[int, np.ndarray, float, float, Node]:
-    """Single-threaded Upper Confidence Bound (UCB) for Trees (UCT) search without any rollout.
-
-    This implementation uses tree parallel search and batched evaluation.
-
-    It follows the following general UCT search algorithm, except here we don't do rollout.
-    ```
-    function UCTSEARCH(r,m)
-      i←1
-      for i ≤ m do
-          n ← select(r)
-          n ← expand(n)
-          ∆ ← rollout(n)
-          backup(n,∆)
-      end for
-      return end function
-    ```
-
-    Args:
-        env: a gym like custom GoEnv environment.
-        eval_func: a evaluation function when called returns the
-            action probabilities and predicted value from
-            current player's perspective.
-        root_node: root node of the search tree, this comes from reuse sub-tree.
-        c_puct_base: a float constant determining the level of exploration.
-        c_puct_init: a float constant determining the level of exploration.
-        k_best: number of best moves to consider at each depth.
-        depth: depth limit for minimax search.
-        num_simulations: number of simulations to run.
-        num_parallel: Number of parallel leaves for MCTS search. This is also the batch size for neural network evaluation.
-        root_noise: whether add dirichlet noise to root node to encourage exploration,
-            default off.
-        warm_up: if true, use temperature 1.0 to generate play policy, other wise use 0.1, default off.
-        deterministic: after the MCTS search, choose the child node with most visits number to play in the game,
-            instead of sample through a probability distribution, default off.
-        use_minimax: whether use minimax algorithm to evaluate the leaf node, default off.
-
-
-    Returns:
-        tuple contains:
-            a integer indicate the sampled action to play in the environment.
-            a 1D numpy.array search policy action probabilities from the MCTS search result.
-            a float indicate the root node value
-            a float indicate the best child value
-            a Node instance represent subtree of this MCTS search, which can be used as next root node for MCTS search.
-
-    Raises:
-        ValueError:
-            if input argument `env` is not valid GoEnv instance.
-            if input argument `num_simulations` is not a positive integer.
-        RuntimeError:
-            if the game is over.
-    """
-    if not isinstance(env, BoardGameEnv):
-        raise ValueError(f'Expect `env` to be a valid BoardGameEnv instance, got {env}')
-    if not 1 <= num_simulations:
-        raise ValueError(f'Expect `num_simulations` to a positive integer, got {num_simulations}')
-    if env.is_game_over():
-        raise RuntimeError('Game is over.')
-
     start_time = time.perf_counter()
-    # Create root node
+
+    try:
+        with open(trigger_config_path, 'r') as f:
+            config = yaml.safe_load(f)
+    except FileNotFoundError:
+        logger.warning(f"Trigger config file not found at {trigger_config_path}. Using default values.")
+        config = {}
+
+    trigger_controller = TriggerController(config)
+    alpha_beta_engine = AlphaBetaEngine(eval_func)
+    backprop_config = config.get('backprop_config', {})
+
     if root_node is None:
+        root_node = Node(to_play=env.to_play, num_actions=env.action_space.n, parent=None)
+
+    if not root_node.is_expanded:
         prior_prob, value = eval_func(env.observation(), False)
-        root_node = Node(to_play=env.to_play, num_actions=env.action_dim, parent=DummyNode())
         expand(root_node, prior_prob)
-        backup(root_node, value, value)
+        backup(root_node, value, value, backprop_config)
 
-    assert root_node.to_play == env.to_play
+    legal_actions = env.legal_actions
+    
+    dirichlet_alpha = 0.03
+    dirichlet_eps = 0.25
 
-    root_legal_actions = env.legal_actions
-
-    # Add dirichlet noise to the prior probabilities to root node.
     if root_noise:
-        add_dirichlet_noise(root_node, root_legal_actions)
-
-    transposition_table = TranspositionTable()
-    while root_node.N < num_simulations + num_parallel:
+        add_dirichlet_noise(root_node, legal_actions, dirichlet_eps, dirichlet_alpha)
+    
+    trigger_controller.reset()
+    
+    for _ in range(num_simulations // num_parallel):
         leaves = []
         failsafe = 0
 
         while len(leaves) < num_parallel and failsafe < num_parallel * 2:
-
-            # This is necessary as when a game is over no leaf is added to leaves,
-            # as we use the actual game results to update statistic
             failsafe += 1
-            node = root_node
-
-            # Make sure do not touch the actual environment.
             sim_env = env.clone()
-            obs = sim_env.observation()
-            done = sim_env.is_game_over()
-
-            # Phase 1 - Select
-            #  best child node until one of the following is true:
-            # - reach a leaf node.
-            # - game is over.
+            node = root_node
+            
             while node.is_expanded:
-                # Select the best move and create the child node on demand
-                node = best_child(node, sim_env.legal_actions, c_puct_base, c_puct_init, sim_env.opponent_player)
-                # Make move on the simulation environment.
-                obs, reward, done, _ = sim_env.step(node.move)
-                if done:
+                node = best_child(node, sim_env.legal_actions, c_puct_base, c_puct_init)
+                sim_env.step(node.move)
+                if sim_env.is_game_over():
                     break
-
-            assert node.to_play == sim_env.to_play
-
-            # Special case - If game is over, using the actual reward from the game to update statistics.
-            if done:
-                # The reward is for the last player who made the move won/loss the game.
-                assert node.to_play != sim_env.last_player
-                backup(node, -reward, -reward)
-                continue
+            
+            if sim_env.is_game_over():
+                result = sim_env.get_result()
+                backup(node, -result, -result, backprop_config)
             else:
                 add_virtual_loss(node)
-                leaves.append((node, obs))
+                leaves.append((node, sim_env))
+
         if leaves:
-            batched_nodes, batched_obs = map(list, zip(*leaves))
-            prior_probs, values = eval_func(np.stack(batched_obs, axis=0), True)
+            observations = np.array([l[1].observation() for l in leaves])
+            all_prior_probs, all_leaf_values = eval_func(observations, True)
 
-            if use_minimax:
-                # print(f"Leaf depth: {leaf.depth}, Minimax depth: {minimax_depth}")
-                minimax_values = [
-                    minimax(
-                        sim_env, 
-                        eval_func, 
-                        depth, 
-                        k_best,  
-                        transposition_table,
-                    ) for _ in batched_nodes
-                ]
-                # print(f"Minimax value: {value}")
-                for leaf, prior_prob, value, minimax_value in zip(batched_nodes, prior_probs, values, minimax_values):
-                    revert_virtual_loss(leaf)
+            for i, (node, sim_env) in enumerate(leaves):
+                revert_virtual_loss(node)
+                prior_prob, leaf_value = all_prior_probs[i], all_leaf_values[i]
+                expand(node, prior_prob)
+                
+                minimax_value = leaf_value
+                
+                if use_minimax:
+                    if node.depth < 4:
+                         minimax_value = alpha_beta_engine.search(sim_env, depth=2, k_best=8)
 
-                    # If a node was picked multiple times (despite virtual losses), we shouldn't
-                    # expand it more than once.
-                    if leaf.is_expanded:
-                        continue
+                    if trigger_controller.should_minimax(node, sim_env, node.move):
+                        search_depth = 4 if trigger_controller.is_tactical else 2
+                        search_k_best = 4 if trigger_controller.is_tactical else 8
+                        minimax_value = alpha_beta_engine.search(sim_env, depth=search_depth, k_best=search_k_best)
+                        node.minimax_eval = minimax_value
+                
+                backup(node, leaf_value, minimax_value, backprop_config)
 
-                    expand(leaf, prior_prob)
-                    backup(leaf, value, minimax_value)
-
-            else:
-                for leaf, prior_prob, value in zip(batched_nodes, prior_probs, values):
-                    revert_virtual_loss(leaf)
-
-                # If a node was picked multiple times (despite virtual losses), we shouldn't
-                # expand it more than once.
-                if leaf.is_expanded:
-                    continue
-
-                expand(leaf, prior_prob)
-                backup(leaf, value, value) # Backup with both MCTS values
-
-    # Play - generate search policy action probability from the root node's child visit number.
-    search_pi = generate_search_policy(root_node.child_N, 1.0 if warm_up else 0.1, root_legal_actions)
+    temperature = 1.0 if warm_up else 0.1
+    search_pi = generate_search_policy(root_node.child_N, temperature, legal_actions)
 
     move = None
     next_root_node = None
     best_child_Q = 0.0
 
     if deterministic:
-        # Choose the child with most visit count.
         move = np.argmax(root_node.child_N)
     else:
-        # Sample an action
-        # Prevent the agent to select pass move during opening moves
-        while move is None or (warm_up and env.has_pass_move and move == env.pass_move) or root_legal_actions[move] != 1:
+        while move is None or (warm_up and env.has_pass_move and move == env.pass_move) or legal_actions[move] != 1:
             move = np.random.choice(np.arange(search_pi.shape[0]), p=search_pi)
 
-    if move in root_node.children:
-        next_root_node = root_node.children[move]
+    next_root_node = root_node.children[move]
+    next_root_node.parent = None
+    best_child_Q = -next_root_node.Q
 
-        N, W = copy.copy(next_root_node.N), copy.copy(next_root_node.W)
-        next_root_node.parent = DummyNode()
-        next_root_node.move = None
-        next_root_node.N = N
-        next_root_node.W = W
-
-        # Child value is computed from opponent's perspective, so we switch the sign
-        best_child_Q = -next_root_node.Q
-
-    assert root_legal_actions[move] == 1
-
-    # Calculate time taken for search
-    end_time = time.perf_counter()
-    logger.info(f"Time taken for search: {end_time - start_time}")
-
-    return move, search_pi, root_node.Q, best_child_Q, next_root_node
-
-    return pi_probs
-
-def enhanced_minimax(node, depth, k_best, eval_fn, move_ordering=True):
-    """
-    Enhanced minimax with move ordering and k-best pruning.
-    
-    Args:
-        node: Current game node
-        depth: Search depth remaining
-        k_best: Number of top moves to consider
-        eval_fn: Position evaluation function
-        move_ordering: Whether to sort moves by heuristic quality
-    
-    Returns:
-        Minimax value from current player's perspective
-    """
-    if depth == 0 or node.is_terminal():
-        return eval_fn(node)
-    
-    legal_moves = node.get_legal_moves()
-    if not legal_moves:
-        return eval_fn(node)
-
-    # Move ordering: sort moves by immediate heuristic value
-    if move_ordering:
-        move_scores = []
-        for move in legal_moves:
-            child = node.play(move)
-            move_scores.append((eval_fn(child), move))
-        move_scores.sort(reverse=node.to_play() == MAX_PLAYER)
-        ordered_moves = [ms[1] for ms in move_scores]
-    else:
-        ordered_moves = legal_moves
-
-    # K-best pruning - only consider top k moves
-    if k_best < len(ordered_moves):
-        ordered_moves = ordered_moves[:k_best]
-
-    if node.to_play() == MAX_PLAYER:
-        value = -math.inf
-        for move in ordered_moves:
-            child = node.play(move)
-            value = max(value, enhanced_minimax(child, depth-1, k_best, eval_fn))
-            if value >= math.inf:  # Alpha-beta pruning
-                break
-        return value
-    else:
-        value = math.inf
-        for move in ordered_moves:
-            child = node.play(move)
-            value = min(value, enhanced_minimax(child, depth-1, k_best, eval_fn))
-            if value <= -math.inf:
-                break
-        return value
-
-class MCTSNode:
-    def __init__(self, state, parent=None, move=None):
-        self.state = state
-        self.parent = parent
-        self.move = move
-        self.children = {}
-        self.visit_count = 0
-        self.value_sum = 0.0
-        self.prior = 0.0  # New prior field for heuristic guidance
-        
-    def select_child(self, exploration_weight):
-        """
-        Modified UCB selection with heuristic prior integration
-        """
-        total_visits = math.log(self.visit_count + 1)
-        
-        def ucb_score(child):
-            prior_score = exploration_weight * child.prior * math.sqrt(total_visits) / (child.visit_count + 1)
-            exploitation = child.value_sum / (child.visit_count + 1e-8)
-            return exploitation + prior_score
-            
-        return max(self.children.values(), key=ucb_score)
-
-    def expand(self, state, move, prior):
-        """
-        Expand node with minimax-enhanced prior
-        """
-        child = MCTSNode(state, self, move)
-        child.prior = prior
-        self.children[move] = child
-        return child
-
-class MCTS:
-    def __init__(self, config):
-        self.config = config
-        self.eval_fn = config.eval_fn
-        self.transposition_table = {}
-        
-    def run(self, root_state, num_simulations):
-        root = MCTSNode(root_state)
-        
-        for _ in range(num_simulations):
-            # Selection phase
-            node = root
-            search_path = [node]
-            
-            while not node.is_terminal() and node.children:
-                node = node.select_child(self.config.c_puct)
-                search_path.append(node)
-            
-            # Expansion with minimax prior
-            if not node.is_terminal() and not node.children:
-                legal_moves = node.state.get_legal_moves()
-                
-                # Only use minimax for critical nodes (configurable)
-                if self.config.use_minimax(node.state):
-                    minimax_value = enhanced_minimax(
-                        node.state,
-                        depth=self.config.minimax_depth,
-                        k_best=self.config.k_best,
-                        eval_fn=self.eval_fn
-                    )
-                    prior = self._value_to_prior(minimax_value)
-                else:
-                    prior = 0.0  # Fallback to uniform prior
-                
-                # Store in transposition table
-                self.transposition_table[node.state] = prior
-                
-                for move in legal_moves:
-                    child_state = node.state.play(move)
-                    child_prior = self.transposition_table.get(child_state, prior)
-                    node.expand(child_state, move, child_prior)
-            
-            # Backpropagation with minimax value if available
-            value = self._evaluate(node.state)
-            self._backpropagate(search_path, value)
-            
-        return self._get_action_probs(root)
-
-    def _value_to_prior(self, value):
-        """Convert minimax value to prior probability"""
-        return 1 / (1 + math.exp(-value / 0.5))  # Sigmoid scaling
-
-    def _evaluate(self, state):
-        """Hybrid evaluation: combine rollout and minimax value"""
-        if self.config.use_minimax_eval:
-            return enhanced_minimax(
-                state,
-                depth=self.config.eval_depth,
-                k_best=self.config.eval_k_best,
-                eval_fn=self.eval_fn
-            )
-        return self.eval_fn(state)
+    log_timing(start_time, "Parallel UCT search")
+    return (move, search_pi, root_node.Q, best_child_Q, next_root_node)

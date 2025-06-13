@@ -94,6 +94,7 @@ class BoardGameEnv(gym.Env):
         self.cc = CoordsConvertor(self.board_size)
         self.zobrist_seed = zobrist_seed
         self._initialize_zobrist()
+        self.current_hash = self.compute_zobrist_hash()
 
     def _initialize_zobrist(self):
         """Initialize the Zobrist hashing tables."""

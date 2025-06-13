@@ -1,0 +1,51 @@
+# Configuration for the MCTS TriggerController
+# All values are examples and should be tuned based on experimentation.
+
+# --- Uncertainty Triggers ---
+
+# Trigger minimax if the policy network's output is uncertain.
+# Higher values mean the trigger is less sensitive to policy uncertainty.
+# Good starting range: 1.0 - 2.0
+policy_entropy_threshold: 1.5
+
+# Trigger minimax if the value estimates from simulations are unstable.
+# Higher values mean the trigger is less sensitive to value fluctuations.
+# Good starting range: 0.05 - 0.2
+value_variance_threshold: 0.1
+
+
+# --- Heuristic Triggers ---
+
+# Minimum number of visits to a node before the visit-count heuristic can fire.
+# Prevents triggering on nodes with too few simulations.
+# Good starting range: 20 - 100
+visit_count_threshold: 50
+
+# Trigger minimax if the difference between the best and worst child win-rate
+# is large, indicating a contested position.
+# Good starting range: 0.2 - 0.5
+winrate_spread_threshold: 0.3
+
+
+# --- Search Control ---
+
+# The maximum number of times minimax can be called in a single move's search.
+# This acts as a budget to prevent excessive time spent in minimax.
+# Good starting range: 32 - 128
+max_minimax_calls_per_move: 64
+# --- Backpropagation Control ---
+
+# Configuration for advanced backpropagation strategies.
+backprop_config:
+  # Schedule for the power-mean exponent 'p'.
+  # Format: [[visit_count, p_value], ...]
+  power_p_schedule:
+    - [0, 2.0]    # At 0+ visits, use p=2.0
+    - [200, 4.0]  # At 200+ visits, use p=4.0
+  
+  # Delta for the implicit minimax backup. If a child's win-rate differs
+  # from the sibling mean by more than this, its value is propagated directly.
+  implicit_minimax_delta: 0.9
+  
+  # Minimum number of visits for the implicit minimax backup to activate.
+  implicit_minimax_min_visits: 10
